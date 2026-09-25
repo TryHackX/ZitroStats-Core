@@ -1,0 +1,296 @@
+program test_dll;
+
+{ Loads the built library like the server does and drives it through its exports. }
+
+{$mode objfpc}{$H+}
+
+uses
+  SysUtils, dynlibs, zs_types;
+
+type
+  TInit = function(ScriptDir: PChar; ApiVersion: LongInt): LongInt; cdecl;
+  TProc = procedure; cdecl;
+  TIntFunc = function: LongInt; cdecl;
+  TJoin = procedure(Slot: LongInt; Name, Steam, Hwid, IP: PChar; Team, Human, Admin, Tick: LongInt); cdecl;
+  TMapAfter = procedure(MapName: PChar; GameStyle, ScoreLimit, TimeLimit, Flags, Tick: LongInt); cdecl;
+  TCommand = function(Slot: LongInt; Text: PChar; Source, Admin, Tick: LongInt): LongInt; cdecl;
+  TTextFunc = function: PChar; cdecl;
+  TStatFunc = function(Id, Stat: LongInt): Double; cdecl;
+  THeal = procedure(Slot, Kits, Tick: LongInt; Regen, Kit: Single); cdecl;
+  TKit = procedure(Slot, Style, Tick: LongInt); cdecl;
+  TTeamJoin = function(Slot, Team, OldTeam, Tick: LongInt): LongInt; cdecl;
+  TTopCopy = function(Rank: LongInt; Buf: PChar; Size: LongInt): LongInt; cdecl;
+  TMapList = procedure(Count, CurrentId, Reason, Tick: LongInt; Names: PChar); cdecl;
+
+var
+  Failures: Integer = 0;
+
+procedure Check(const Name: string; Ok: Boolean);
+begin
+  if Ok then
+    WriteLn('[ OK ] ', Name)
+  else
+  begin
+    WriteLn('[FAIL] ', Name);
+    Inc(Failures);
+  end;
+end;
+
+function Sym(Lib: TLibHandle; const Name: AnsiString): Pointer;
+begin
+  Result := GetProcedureAddress(Lib, Name);
+  if Result = nil then
+  begin
+    WriteLn('[FAIL] missing export ', Name);
+    Inc(Failures);
+  end;
+end;
+
+procedure DeleteTree(const Dir: AnsiString);
+var
+  SR: TSearchRec;
+  P: AnsiString;
+begin
+  if not DirectoryExists(Dir) then
+    Exit;
+  if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*', faAnyFile, SR) = 0 then
+  try
+    repeat
+      if (SR.Name = '.') or (SR.Name = '..') then
+        Continue;
+      P := IncludeTrailingPathDelimiter(Dir) + SR.Name;
+      if (SR.Attr and faDirectory) <> 0 then
+        DeleteTree(P)
+      else
+        DeleteFile(P);
+    until FindNext(SR) <> 0;
+  finally
+    FindClose(SR);
+  end;
+  RemoveDir(Dir);
+end;
+
+var
+  Lib: TLibHandle;
+  DllPath, Root: AnsiString;
+  Init: TInit;
+  Shutdown: TProc;
+  IsReady, ActionBegin, ActionNext, ActionSlot, ProfileCount, ClaimToken, ApiVersion: TIntFunc;
+  Token: LongInt;
+  Join: TJoin;
+  MapAfter: TMapAfter;
+  Command: TCommand;
+  ActionText: TTextFunc;
+  PlayerStat: TStatFunc;
+  Heal: THeal;
+  Kit: TKit;
+  TeamJoin: TTeamJoin;
+  TopCopy: TTopCopy;
+  MapListEv: TMapList;
+  T0: Int64;
+  Kind, Lines, Ticks, InTick, MostInTick, n: LongInt;
+  Help: Boolean;
+  Txt, HealLine: AnsiString;
+  Buf: array[0..127] of AnsiChar;
+
+{ Polls the output the way main.pas does (ZS_Action_Begin, then ZS_Action_Next until 0), every
+  10 ms, until a line for Slot holds Needle or TimeoutMs passed; Line is that line. }
+function WaitLine(Slot: LongInt; const Needle: AnsiString; TimeoutMs: LongInt; out Line: AnsiString): Boolean;
+var
+  Start: Int64;
+  K: LongInt;
+  S: AnsiString;
+begin
+  Result := False;
+  Line := '';
+  Start := GetTickCount64;
+  while GetTickCount64 - Start < TimeoutMs do
+  begin
+    Sleep(10);
+    if ActionBegin() = 0 then
+      Continue;
+    repeat
+      K := ActionNext();
+      if K <> 0 then
+      begin
+        S := StrPas(ActionText());
+        if (ActionSlot() = Slot) and (Pos(Needle, S) > 0) then
+        begin
+          Line := S;
+          Result := True;
+        end;
+      end;
+    until K = 0;
+    if Result then
+      Exit;
+  end;
+end;
+
+begin
+  DllPath := ExpandFileName(ParamStr(1));
+  Root := ExpandFileName('build' + PathDelim + 'test' + PathDelim + 'dll_tmp');
+  { every run starts from no data, so the numbers below are exact }
+  DeleteTree(Root);
+  ForceDirectories(Root + PathDelim + 'script');
+  Lib := LoadLibrary(DllPath);
+  Check('library loads', Lib <> NilHandle);
+  if Lib = NilHandle then
+    Halt(1);
+  Init := TInit(Sym(Lib, 'ZS_Init'));
+  Shutdown := TProc(Sym(Lib, 'ZS_Shutdown'));
+  IsReady := TIntFunc(Sym(Lib, 'ZS_Is_Ready'));
+  Join := TJoin(Sym(Lib, 'ZS_Ev_Join'));
+  MapAfter := TMapAfter(Sym(Lib, 'ZS_Ev_Map_After'));
+  Command := TCommand(Sym(Lib, 'ZS_Command'));
+  ActionBegin := TIntFunc(Sym(Lib, 'ZS_Action_Begin'));
+  ActionNext := TIntFunc(Sym(Lib, 'ZS_Action_Next'));
+  ActionSlot := TIntFunc(Sym(Lib, 'ZS_Action_Slot'));
+  ActionText := TTextFunc(Sym(Lib, 'ZS_Action_Text'));
+  ProfileCount := TIntFunc(Sym(Lib, 'ZS_API_Get_Profile_Count'));
+  PlayerStat := TStatFunc(Sym(Lib, 'ZS_API_Get_Player_Stat'));
+  ClaimToken := TIntFunc(Sym(Lib, 'ZS_Claim_Token'));
+  ApiVersion := TIntFunc(Sym(Lib, 'ZS_Get_Api_Version'));
+  { the healing main.pas collects (regenerating polygons, medical / berserker / predator kits) }
+  Heal := THeal(Sym(Lib, 'ZS_Ev_Heal'));
+  { every kit a human picks up }
+  Kit := TKit(Sym(Lib, 'ZS_Ev_Kit'));
+  { the exports main.pas needs for the team balance and the score guard }
+  TeamJoin := TTeamJoin(Sym(Lib, 'ZS_Team_Join'));
+  Sym(Lib, 'ZS_Ev_Move_Result');
+  Sym(Lib, 'ZS_Ev_Integrity');
+  Sym(Lib, 'ZS_Ev_Ray');
+  { for AntiFake, on a thread of its own }
+  TopCopy := TTopCopy(Sym(Lib, 'ZS_API_Top_Player_Copy'));
+  { the maps list of the map vote }
+  MapListEv := TMapList(Sym(Lib, 'ZS_Ev_Map_List'));
+  if Failures > 0 then
+    Halt(Failures);
+
+  SetCurrentDir(Root);
+  Check('wrong API version refused', Init(PChar(Root + PathDelim + 'script'), ZS_API_VERSION - 1) = -ZS_API_VERSION);
+  Check('init', Init(PChar(Root + PathDelim + 'script'), ZS_API_VERSION) = ZS_API_VERSION);
+  Check('second init reuses the engine', Init(PChar(Root + PathDelim + 'script'), ZS_API_VERSION) = ZS_API_VERSION);
+  T0 := GetTickCount64;
+  while (IsReady() = 0) and (GetTickCount64 - T0 < 10000) do
+    Sleep(10);
+  Check('ready', IsReady() = 1);
+
+  MapAfter('ctf_Run', 3, 10, 15, 0, 0);
+  Join(1, 'Tester', 'S777001', 'HW-T', '10.0.0.1', 1, 1, 1, 0);
+  Join(2, 'Other', 'S777002', 'HW-O', '10.0.0.2', 2, 1, 0, 0);
+  Token := ClaimToken();
+  Check('admin token handed out once', (Token <> 0) and (ClaimToken() = 0));
+  Check('console commands need the token', (Command(0, '/zs_status', 2, 0, 10) = 0) and
+    (Command(0, '/zs_status', 2, Token + 1, 10) = 0) and (Command(0, '/zs_status', 2, Token, 10) = 1));
+  Check('ZitroStats commands are claimed', Command(1, '/zitro', 1, 0, 10) = 1);
+  Check('other commands are left alone', Command(1, '/kick someone', 1, 0, 10) = 0);
+  Check('Soldat''s /info and /pm stay Soldat''s, !info and !pm are ours', (Command(1, '/info', 1, 0, 10) = 0) and
+    (Command(0, '/pm 2 hello', 2, Token, 10) = 0) and (Command(1, '!info', 0, 0, 10) = 1) and (Command(1, '!pm', 0, 0, 10) = 1));
+  Check('identity commands are claimed', Command(1, '/login secret', 1, 0, 10) = 1);
+  Sleep(400);
+
+  { the way main.pas polls: ZS_Action_Begin opens a tick, ZS_Action_Next until 0 }
+  Help := False;
+  Lines := 0;
+  Ticks := 0;
+  MostInTick := 0;
+  while Ticks < 1000 do
+  begin
+    { main.pas polls once a tick; ticks that come back to back get nothing }
+    Sleep(10);
+    if ActionBegin() = 0 then
+      Break;
+    Inc(Ticks);
+    InTick := 0;
+    repeat
+      Kind := ActionNext();
+      if Kind <> 0 then
+      begin
+        Inc(Lines);
+        Txt := StrPas(ActionText());
+        if ActionSlot() = 1 then
+        begin
+          Inc(InTick);
+          if Pos('ZitroStats', Txt) > 0 then
+            Help := True;
+        end;
+      end;
+    until Kind = 0;
+    if InTick > MostInTick then
+      MostInTick := InTick;
+  end;
+  Check('command output polled through the exports', Help and (Lines >= 3));
+  Check(Format('one player gets at most 4 lines a tick (%d lines in %d ticks)', [Lines, Ticks]), MostInTick <= 4);
+  Check('developer API: profile count', ProfileCount() = 2);
+  Check('developer API: player points', Round(PlayerStat(1, 0)) = 1000);
+  Check('developer API: MMR before the first rated match', Round(PlayerStat(1, 39)) = 1500);
+  Check('developer API: unknown StatID gives 0', PlayerStat(1, 40) = 0);
+  Check('the API version of the library', ApiVersion() = ZS_API_VERSION);
+
+  { main.pas sends the healing of a player once a second; it lands in the profile and !stats
+    shows it. Negative values and slots without a player change nothing. Slot 2, because slot 1
+    has used up its commands of this second above. }
+  Heal(2, 2, 20, 12.0, 30.0);
+  Heal(2, -3, 21, -50.0, -20.0);
+  Heal(40, 1, 21, 5.0, 5.0);
+  Heal(0, 1, 21, 5.0, 5.0);
+  Check('!stats is a ZitroStats command', Command(2, '!stats', 0, 0, 25) = 1);
+  Help := WaitLine(2, 'Healed:', 5000, HealLine);
+  Check('healing lands in the profile: ' + Trim(HealLine), Help and (Pos('Healed: 42 HP', HealLine) > 0) and
+    (Pos('Regen: 12 HP', HealLine) > 0) and (Pos('Kits: 2 (30 HP)', HealLine) > 0));
+  Check('after the last action there is nothing left to read', (ActionSlot() = 0) and (StrPas(ActionText()) = ''));
+
+  { OnBeforeJoin of a player who joins the server: never -1, the server would take it for full }
+  n := TeamJoin(3, TEAM_ALPHA, 255, 30);
+  Check(Format('a player who joins the server gets a team (%d)', [n]), (n >= 0) and (n <= TEAM_SPEC));
+
+  { the copy for another library: the result is the length, the text always ends with a zero }
+  Buf[0] := 'X';
+  Check('Top_Player_Copy: a buffer of one byte gets the closing zero', (TopCopy(1, @Buf[0], 1) = 0) and (Buf[0] = #0));
+  Check('Top_Player_Copy: no buffer', TopCopy(1, nil, 16) = 0);
+  FillChar(Buf, SizeOf(Buf), Ord('X'));
+  n := TopCopy(1, @Buf[0], SizeOf(Buf));
+  Check(Format('Top_Player_Copy: the text ends with a zero (%d)', [n]), (n >= 0) and (n < SizeOf(Buf)) and (Buf[n] = #0));
+
+  { the map vote: the maps list of main.pas; /votemap (also what F12 sends) is claimed while the map
+    vote is on (the default), /map and /nextmap stay the server's (slot 5 plays no part here) }
+  MapListEv(2, 0, MAPLIST_CHANGED, 40, PChar('ctf_Run' + #10 + 'ctf_Ash' + #10));
+  Check('/votemap belongs to the map vote, also as F12 sends it',
+    (Command(5, '/votemap ctf_Run', SRC_COMMAND, 0, 41) = 1) and (Command(5, 'votemap ctf_Run', SRC_COMMAND, 0, 41) = 1));
+  Check('/map and /nextmap stay the server''s, !map and !nextmap are ZitroStats commands',
+    (Command(5, '/map ctf_Run', SRC_COMMAND, 0, 41) = 0) and (Command(5, '/nextmap', SRC_COMMAND, 0, 41) = 0) and
+    (Command(5, '!nextmap', SRC_CHAT, 0, 41) = 1) and (Command(5, '!map ash', SRC_CHAT, 0, 41) = 1));
+  Check('the maps list reaches the map vote', (Command(0, '/zs_mapvote', SRC_CONSOLE, Token, 42) = 1) and
+    WaitLine(0, 'maps list: 2 maps, next ctf_Ash', 5000, Txt));
+  Check('!searchmap, !allweaponsby and !serverweaponsby are ZitroStats commands',
+    (Command(5, '!searchmap ctf', SRC_CHAT, 0, 43) = 1) and (Command(5, '!allweaponsby kills', SRC_CHAT, 0, 43) = 1) and
+    (Command(5, '/serverweaponsby kills', SRC_COMMAND, 0, 43) = 1));
+
+  { the kits a player picks up, by kind; a style that is no kit counts nothing. Slot 2 has used its
+    commands of this second above, so the answer waits for the next second. }
+  Kit(2, KIT_MEDICAL, 50);
+  Kit(2, KIT_VEST, 51);
+  Kit(2, 5, 52);
+  Sleep(1100);
+  Check('!otherstats is a ZitroStats command', Command(2, '!otherstats', 0, 0, 120) = 1);
+  Help := WaitLine(2, 'Kits: Med', 5000, Txt);
+  Check('the kits picked up land in the profile: ' + Trim(Txt), Help and
+    (Txt = 'Kits: Med 1, Nade 0, Cluster 0, Vest 1, Berserk 0, Predator 0, Flamer 0'));
+
+  T0 := GetTickCount64;
+  Shutdown();
+  Check('shutdown returns', GetTickCount64 - T0 < 10000);
+  Check('restart after shutdown', Init(PChar(Root + PathDelim + 'script'), ZS_API_VERSION) = ZS_API_VERSION);
+  Check('a new engine has a new token', ClaimToken() <> 0);
+  T0 := GetTickCount64;
+  while (IsReady() = 0) and (GetTickCount64 - T0 < 10000) do
+    Sleep(10);
+  Check('accounts persisted', ProfileCount() = 2);
+  Shutdown();
+
+  if Failures = 0 then
+    WriteLn('ALL TESTS PASSED')
+  else
+    WriteLn(Failures, ' TEST(S) FAILED');
+  Halt(Failures);
+end.
