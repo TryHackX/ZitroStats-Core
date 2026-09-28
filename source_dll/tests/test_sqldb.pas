@@ -9,14 +9,17 @@ program test_sqldb;
   at once becomes one account, a map played on both adds up, and a job of the day goes to one of
   them only. Then what goes wrong: a SteamID longer than its column, a change counter that went
   back, a server that never joined and starts without the database (a table of another engine
-  refuses it), and a counter of account numbers set back by hand. It drops the zs_db_* tables at
-  the start and at the end. }
+  refuses it), and a counter of account numbers set back by hand. The player-on-map records
+  ([Matrix]) go along: they add up on both servers, a server that joins brings its records with
+  their rivals under the numbers of the database, a record pruned on one server goes on the
+  others, and what a server collected without the database reaches them after its next start. It
+  drops the zs_db_* tables at the start and at the end. }
 
 {$mode objfpc}{$H+}
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  SysUtils, Classes, md5, zs_types, zs_util, zs_db, zs_identity, zs_engine, zs_sqldb, mysqlwire;
+  SysUtils, Classes, md5, zs_types, zs_util, zs_fields, zs_db, zs_matrix, zs_identity, zs_engine, zs_sqldb, mysqlwire;
 
 var
   Failures: Integer = 0;
@@ -189,8 +192,8 @@ end;
 
 procedure DropTables;
 const
-  TABLES: array[0..5] of AnsiString = ('zs_db_accounts', 'zs_db_maps', 'zs_db_server', 'zs_db_seasons', 'zs_db_meta',
-    'zs_db_jobs');
+  TABLES: array[0..6] of AnsiString = ('zs_db_accounts', 'zs_db_maps', 'zs_db_server', 'zs_db_seasons', 'zs_db_meta',
+    'zs_db_jobs', 'zs_db_player_maps');
 var
   C: TMyConnection;
   k: LongInt;
@@ -395,6 +398,113 @@ begin
   end;
 end;
 
+{ [Matrix]: the kills of the record of an account on a map on an engine, -1 when it has none }
+function PMKills(E: TZSEngine; AccountId: LongInt; const Map: AnsiString): LongInt;
+var
+  R: PPlayerMapStats;
+begin
+  Result := -1;
+  EnterCriticalSection(E.StateLock);
+  try
+    R := E.DB.PM.Find(AccountId, Map);
+    if R <> nil then
+      Result := R^.Kills;
+  finally
+    LeaveCriticalSection(E.StateLock);
+  end;
+end;
+
+function PMDeaths(E: TZSEngine; AccountId: LongInt; const Map: AnsiString): LongInt;
+var
+  R: PPlayerMapStats;
+begin
+  Result := -1;
+  EnterCriticalSection(E.StateLock);
+  try
+    R := E.DB.PM.Find(AccountId, Map);
+    if R <> nil then
+      Result := R^.Deaths;
+  finally
+    LeaveCriticalSection(E.StateLock);
+  end;
+end;
+
+{ the kills and deaths of a record against one rival: 'kills/deaths', '-' when there is no entry }
+function RivalKD(E: TZSEngine; AccountId: LongInt; const Map: AnsiString; RivalId: LongInt): AnsiString;
+var
+  R: PPlayerMapStats;
+  p: LongInt;
+begin
+  Result := '-';
+  EnterCriticalSection(E.StateLock);
+  try
+    R := E.DB.PM.Find(AccountId, Map);
+    if (R <> nil) and PMRivalPos(R^.Rivals, RivalId, p) then
+      Result := IntToStr(R^.Rivals[p].Kills) + '/' + IntToStr(R^.Rivals[p].Deaths);
+  finally
+    LeaveCriticalSection(E.StateLock);
+  end;
+end;
+
+{ the points of a record won from one rival and lost to him: 'won/lost', '-' when there is no entry }
+function RivalPts(E: TZSEngine; AccountId: LongInt; const Map: AnsiString; RivalId: LongInt): AnsiString;
+var
+  R: PPlayerMapStats;
+  p: LongInt;
+begin
+  Result := '-';
+  EnterCriticalSection(E.StateLock);
+  try
+    R := E.DB.PM.Find(AccountId, Map);
+    if (R <> nil) and PMRivalPos(R^.Rivals, RivalId, p) then
+      Result := IntToStr(R^.Rivals[p].PointsWon) + '/' + IntToStr(R^.Rivals[p].PointsLost);
+  finally
+    LeaveCriticalSection(E.StateLock);
+  end;
+end;
+
+{ the points of the record of an account on a map, High(LongInt) when it has none }
+function PMPoints(E: TZSEngine; AccountId: LongInt; const Map: AnsiString): LongInt;
+var
+  R: PPlayerMapStats;
+begin
+  Result := High(LongInt);
+  EnterCriticalSection(E.StateLock);
+  try
+    R := E.DB.PM.Find(AccountId, Map);
+    if R <> nil then
+      Result := R^.Points;
+  finally
+    LeaveCriticalSection(E.StateLock);
+  end;
+end;
+
+{ every rival entry of a record as 'id:kills/deaths', for the output }
+function RivalsText(E: TZSEngine; AccountId: LongInt; const Map: AnsiString): AnsiString;
+var
+  R: PPlayerMapStats;
+  p: LongInt;
+begin
+  Result := '';
+  EnterCriticalSection(E.StateLock);
+  try
+    R := E.DB.PM.Find(AccountId, Map);
+    if R = nil then
+      Exit('no record');
+    for p := 0 to High(R^.Rivals) do
+      Result := Result + Format(' #%d:%d/%d', [R^.Rivals[p].Id, R^.Rivals[p].Kills, R^.Rivals[p].Deaths]);
+  finally
+    LeaveCriticalSection(E.StateLock);
+  end;
+end;
+
+{ a column of the row of a record in zs_db_player_maps }
+function PMRow(AccountId: LongInt; const Map, Column: AnsiString): AnsiString;
+begin
+  Result := Scalar('SELECT ' + Column + ' FROM zs_db_player_maps WHERE account_id = ' + IntToStr(AccountId) +
+    ' AND map_name = ' + MyStr(Map));
+end;
+
 var
   A, B, C, D: TZSEngine;
   Base, AliceRow: AnsiString;
@@ -402,6 +512,9 @@ var
   GotA, GotB: Boolean;
   NiaA, NiaB, KillsA, KillsB, Other, Session, K0, KB0: LongInt;
   RegA, RegB, Locked: Boolean;
+  { [Matrix] }
+  AliceId, BobId, CarolId, EveId, EveLocal, FrankId, Pruned, k: LongInt;
+  CarolLast: Double;
 begin
   if ParamCount < 4 then
   begin
@@ -452,6 +565,50 @@ begin
   LeaveCriticalSection(B.StateLock);
   Check('and in the database', Scalar('SELECT kills FROM zs_db_accounts WHERE steam = ''S7001''') = '6');
   Check('the same account number on both servers', (IdOf(A, 'S7001') > 0) and (IdOf(A, 'S7001') = IdOf(B, 'S7001')));
+
+  { ---- [Matrix]: Alice's record of ctf_Ash, 3 kills on each server, adds up on both - with the
+    rival entries on both sides - and in the database ---- }
+  AliceId := IdOf(A, 'S7001');
+  BobId := IdOf(A, 'S7002');
+  T0 := MonoMs;
+  repeat
+    Sleep(200);
+  until ((PMKills(A, AliceId, 'ctf_Ash') = 6) and (PMKills(B, AliceId, 'ctf_Ash') = 6) and
+    (RivalKD(A, AliceId, 'ctf_Ash', BobId) = '6/0') and (RivalKD(B, AliceId, 'ctf_Ash', BobId) = '6/0') and
+    (RivalKD(A, BobId, 'ctf_Ash', AliceId) = '0/6') and (RivalKD(B, BobId, 'ctf_Ash', AliceId) = '0/6') and
+    (PMRow(AliceId, 'ctf_Ash', 'kills') = '6')) or (MonoMs - T0 > 20000);
+  WriteLn(Format('       Alice on ctf_Ash: %d kills on A, %d on B, %s in the database; rivals on A:%s',
+    [PMKills(A, AliceId, 'ctf_Ash'), PMKills(B, AliceId, 'ctf_Ash'), PMRow(AliceId, 'ctf_Ash', 'kills'),
+     RivalsText(A, AliceId, 'ctf_Ash')]));
+  Check('a record of a map played on both servers adds up on both',
+    (PMKills(A, AliceId, 'ctf_Ash') = 6) and (PMKills(B, AliceId, 'ctf_Ash') = 6) and
+    (PMDeaths(A, BobId, 'ctf_Ash') = 6) and (PMDeaths(B, BobId, 'ctf_Ash') = 6));
+  Check('with the rival entries of both sides', (RivalKD(A, AliceId, 'ctf_Ash', BobId) = '6/0') and
+    (RivalKD(B, AliceId, 'ctf_Ash', BobId) = '6/0') and (RivalKD(A, BobId, 'ctf_Ash', AliceId) = '0/6') and
+    (RivalKD(B, BobId, 'ctf_Ash', AliceId) = '0/6'));
+  Check('and in the database', (PMRow(AliceId, 'ctf_Ash', 'kills') = '6') and
+    (PMRow(BobId, 'ctf_Ash', 'deaths') = '6') and (PMRow(AliceId, 'ctf_Ash', 'deleted') = '0'));
+  { the points both ways: only kills moved points on the map, so what Alice won from Bob is her points
+    of the map on both servers, and what Bob lost to her his }
+  T0 := MonoMs;
+  repeat
+    Sleep(200);
+  until ((PMPoints(A, AliceId, 'ctf_Ash') > 0) and (PMPoints(A, AliceId, 'ctf_Ash') < High(LongInt)) and
+    (RivalPts(A, AliceId, 'ctf_Ash', BobId) = IntToStr(PMPoints(A, AliceId, 'ctf_Ash')) + '/0') and
+    (RivalPts(B, AliceId, 'ctf_Ash', BobId) = RivalPts(A, AliceId, 'ctf_Ash', BobId)) and
+    (RivalPts(A, BobId, 'ctf_Ash', AliceId) = '0/' + IntToStr(-PMPoints(A, BobId, 'ctf_Ash'))) and
+    (RivalPts(B, BobId, 'ctf_Ash', AliceId) = RivalPts(A, BobId, 'ctf_Ash', AliceId))) or (MonoMs - T0 > 20000);
+  WriteLn(Format('       points on ctf_Ash: Alice %d (A) %d (B), entry of Bob %s (A) %s (B); ' +
+    'Bob %d, entry of Alice %s (A) %s (B)', [PMPoints(A, AliceId, 'ctf_Ash'), PMPoints(B, AliceId, 'ctf_Ash'),
+     RivalPts(A, AliceId, 'ctf_Ash', BobId), RivalPts(B, AliceId, 'ctf_Ash', BobId), PMPoints(A, BobId, 'ctf_Ash'),
+     RivalPts(A, BobId, 'ctf_Ash', AliceId), RivalPts(B, BobId, 'ctf_Ash', AliceId)]));
+  Check('the points won from a rival and lost to him add up on both servers as well',
+    (PMPoints(A, AliceId, 'ctf_Ash') > 0) and (PMPoints(A, AliceId, 'ctf_Ash') = PMPoints(B, AliceId, 'ctf_Ash')) and
+    (RivalPts(A, AliceId, 'ctf_Ash', BobId) = IntToStr(PMPoints(A, AliceId, 'ctf_Ash')) + '/0') and
+    (RivalPts(B, AliceId, 'ctf_Ash', BobId) = RivalPts(A, AliceId, 'ctf_Ash', BobId)) and
+    (RivalPts(A, BobId, 'ctf_Ash', AliceId) = '0/' + IntToStr(-PMPoints(A, BobId, 'ctf_Ash'))) and
+    (RivalPts(B, BobId, 'ctf_Ash', AliceId) = RivalPts(A, BobId, 'ctf_Ash', AliceId)) and
+    (PMPoints(A, AliceId, 'ctf_Ash') = -PMPoints(A, BobId, 'ctf_Ash')));
 
   { ---- an account made on B appears on A ---- }
   Join(B, 3, 'Carol', 'S7003', 'HWB3', '2.2.2.3', TEAM_ALPHA);
@@ -518,6 +675,7 @@ begin
     Sleep(100);
   until (KillsOf(C, 'S7001') = 4) or (MonoMs - T0 > 5000);
   WriteLn(Format('       C before joining: Alice %d kills', [KillsOf(C, 'S7001')]));
+  EveLocal := ComputerAccount(C, 'HWC2', KillsA, RegA);
   C.Shutdown;
   C.Free;
   C := MakeEngine(Base + PathDelim + 'c', 3, 'mysql', False);
@@ -529,6 +687,70 @@ begin
   WriteLn(Format('       Alice after C joined: %d kills on A, %d on C', [KillsOf(A, 'S7001'), KillsOf(C, 'S7001')]));
   Check('its accounts join the same players of the database', (KillsOf(A, 'S7001') = 10) and (KillsOf(C, 'S7001') = 10));
   Check('an account without Steam comes along', Scalar('SELECT COUNT(*) FROM zs_db_accounts WHERE steam IS NULL AND name = ''Eve''') = '1');
+
+  { ---- [Matrix]: the records of C came along, their rivals under the numbers of the database:
+    Eve's number of C's files may be another account's in the database (Bob's here), and Alice's
+    kills against Eve must not go to that one ---- }
+  EveId := ComputerAccount(A, 'HWC2', KillsA, RegA);
+  T0 := MonoMs;
+  repeat
+    Sleep(200);
+  until ((PMKills(A, AliceId, 'ctf_Ash') = 10) and (PMKills(C, AliceId, 'ctf_Ash') = 10) and
+    (RivalKD(A, AliceId, 'ctf_Ash', EveId) = '4/0') and (RivalKD(A, AliceId, 'ctf_Ash', BobId) = '6/0') and
+    (RivalKD(A, EveId, 'ctf_Ash', AliceId) = '0/4')) or (MonoMs - T0 > 20000);
+  WriteLn(Format('       Eve: #%d in C''s files, #%d in the database (Bob #%d); Alice''s rivals on A:%s',
+    [EveLocal, EveId, BobId, RivalsText(A, AliceId, 'ctf_Ash')]));
+  Check('a server that joins brings its records: they add to the records of the database',
+    (PMKills(A, AliceId, 'ctf_Ash') = 10) and (PMKills(C, AliceId, 'ctf_Ash') = 10) and
+    (PMRow(AliceId, 'ctf_Ash', 'kills') = '10') and (PMDeaths(A, EveId, 'ctf_Ash') = 4));
+  Check('with their rivals under the numbers of the database', (EveId > 0) and (EveId <> EveLocal) and
+    (RivalKD(A, AliceId, 'ctf_Ash', EveId) = '4/0') and (RivalKD(A, AliceId, 'ctf_Ash', BobId) = '6/0') and
+    (RivalKD(A, EveId, 'ctf_Ash', AliceId) = '0/4') and (RivalKD(C, AliceId, 'ctf_Ash', EveId) = '4/0'));
+  { the points of C's kills came along under the new numbers: Alice's entry of Eve won what Eve's
+    entry of Alice lost, on A as on C, and the points against Bob stay }
+  T0 := MonoMs;
+  repeat
+    Sleep(200);
+  until ((RivalPts(A, AliceId, 'ctf_Ash', EveId) = RivalPts(C, AliceId, 'ctf_Ash', EveId)) and
+    (RivalPts(A, EveId, 'ctf_Ash', AliceId) = RivalPts(C, EveId, 'ctf_Ash', AliceId))) or (MonoMs - T0 > 20000);
+  WriteLn(Format('       after C joined: Alice''s entry of Eve %s (A) %s (C), Eve''s of Alice %s (A), Alice''s of Bob %s (A)',
+    [RivalPts(A, AliceId, 'ctf_Ash', EveId), RivalPts(C, AliceId, 'ctf_Ash', EveId), RivalPts(A, EveId, 'ctf_Ash', AliceId),
+     RivalPts(A, AliceId, 'ctf_Ash', BobId)]));
+  Check('with the points both ways under the numbers of the database',
+    (Pos('/0', RivalPts(A, AliceId, 'ctf_Ash', EveId)) > 1) and (RivalPts(A, AliceId, 'ctf_Ash', EveId) <> '0/0') and
+    (RivalPts(A, AliceId, 'ctf_Ash', EveId) = RivalPts(C, AliceId, 'ctf_Ash', EveId)) and
+    (RivalPts(A, EveId, 'ctf_Ash', AliceId) = '0/' + Copy(RivalPts(A, AliceId, 'ctf_Ash', EveId), 1,
+      Pos('/', RivalPts(A, AliceId, 'ctf_Ash', EveId)) - 1)) and
+    (RivalPts(C, EveId, 'ctf_Ash', AliceId) = RivalPts(A, EveId, 'ctf_Ash', AliceId)));
+
+  { ---- [Matrix]: a record pruned on B ([Matrix] MatrixPruneDays) goes on A and in the database ---- }
+  CarolId := IdOf(B, 'S7003');
+  T0 := MonoMs;
+  repeat
+    Sleep(200);
+  until (PMKills(A, CarolId, 'ctf_Ash') = 1) or (MonoMs - T0 > 20000);
+  Check('the record of an account made on B reached A', PMKills(A, CarolId, 'ctf_Ash') = 1);
+  EnterCriticalSection(B.StateLock);
+  try
+    k := B.DB.IndexOfSteam('S7003');
+    CarolLast := B.DB.Profiles[k]^.LastPlayedTime;
+    B.DB.Profiles[k]^.LastPlayedTime := B.DB.NowValue - 100;
+    Pruned := B.DB.PrunePlayerMaps(90);
+    B.DB.Profiles[k]^.LastPlayedTime := CarolLast;
+  finally
+    LeaveCriticalSection(B.StateLock);
+  end;
+  T0 := MonoMs;
+  repeat
+    Sleep(200);
+  until ((PMKills(A, CarolId, 'ctf_Ash') = -1) and (PMRow(CarolId, 'ctf_Ash', 'deleted') = '1')) or
+    (MonoMs - T0 > 20000);
+  WriteLn(Format('       pruned on B: %d record(s); Carol on A: %d kills (-1 = no record), row deleted = %s',
+    [Pruned, PMKills(A, CarolId, 'ctf_Ash'), PMRow(CarolId, 'ctf_Ash', 'deleted')]));
+  Check('a record pruned on one server goes on the others and in the database', (Pruned = 1) and
+    (PMKills(B, CarolId, 'ctf_Ash') = -1) and (PMKills(A, CarolId, 'ctf_Ash') = -1) and
+    (PMRow(CarolId, 'ctf_Ash', 'deleted') = '1') and (PMRow(CarolId, 'ctf_Ash', 'data') = ''));
+  Check('the other records stay', (PMKills(A, AliceId, 'ctf_Ash') = 10) and (PMKills(B, AliceId, 'ctf_Ash') = 10));
 
   { ---- a player without Steam is the account of the computer, as on one server ---- }
   Join(A, 6, 'Nia', '', 'HWN1', '1.1.1.6', TEAM_ALPHA);
@@ -585,6 +807,8 @@ begin
   C.Free;
   C := MakeEngine(Base + PathDelim + 'c', 3, 'mysql', False, '1');
   Check('server C starts from its files without the database', WaitReady(C));
+  { the records of the map are counted without the database as well ([Matrix]) }
+  MapAfter(C, 'ctf_Ash');
   Join(C, 1, 'Alice', 'S7001', 'HWC1', '3.3.3.1', TEAM_ALPHA);
   Join(C, 2, 'Eve', '', 'HWC2', '3.3.3.2', TEAM_BRAVO);
   Join(C, 3, 'Frank', 'S7006', 'HWC3', '3.3.3.3', TEAM_ALPHA);
@@ -617,8 +841,35 @@ begin
     KillsOf(C, 'S7001'), KillsOf(A, 'S7006')]));
   Check('what C collected without the database reaches the others after its next start',
     (KillsOf(A, 'S7001') = 12) and (KillsOf(C, 'S7001') = 12) and (KillsOf(A, 'S7006') = 1));
+  { the player-on-map records of an account new there ([Matrix]) waited for its number and go with
+    the first exchange after the start: until then the list beside the files keeps them }
+  T0 := MonoMs;
+  repeat
+    Sleep(200);
+  until not FileExists(Base + PathDelim + 'c' + PathDelim + 'data' + PathDelim + 'zitrostats.shared') or
+    (MonoMs - T0 > 20000);
   Check('and nothing waits beside the files any more',
     not FileExists(Base + PathDelim + 'c' + PathDelim + 'data' + PathDelim + 'zitrostats.shared'));
+  { [Matrix]: the records C collected without the database were kept beside the files over the stop
+    and reached the others after its next start - Frank's too, whose account was new there and got
+    its number only in that start, and Eve's entry of Frank under that number }
+  FrankId := IdOf(A, 'S7006');
+  T0 := MonoMs;
+  repeat
+    Sleep(200);
+  until ((PMKills(A, AliceId, 'ctf_Ash') = 12) and (PMKills(A, FrankId, 'ctf_Ash') = 1) and
+    (PMDeaths(A, EveId, 'ctf_Ash') = 7) and (RivalKD(A, FrankId, 'ctf_Ash', EveId) = '1/0') and
+    (RivalKD(A, EveId, 'ctf_Ash', FrankId) = '0/1') and (RivalKD(A, EveId, 'ctf_Ash', AliceId) = '0/6') and
+    (PMRow(FrankId, 'ctf_Ash', 'kills') = '1')) or (MonoMs - T0 > 20000);
+  WriteLn(Format('       after C came back: Alice %d kills on ctf_Ash on A, Frank #%d %d; Eve''s rivals on A:%s',
+    [PMKills(A, AliceId, 'ctf_Ash'), FrankId, PMKills(A, FrankId, 'ctf_Ash'), RivalsText(A, EveId, 'ctf_Ash')]));
+  Check('the records collected without the database survive the stop and reach the others',
+    (PMKills(A, AliceId, 'ctf_Ash') = 12) and (PMKills(C, AliceId, 'ctf_Ash') = 12) and
+    (RivalKD(A, EveId, 'ctf_Ash', AliceId) = '0/6') and (PMRow(AliceId, 'ctf_Ash', 'kills') = '12'));
+  Check('a new account''s record too, and the entries naming it, under its number of the database',
+    (FrankId > 0) and (PMKills(A, FrankId, 'ctf_Ash') = 1) and (RivalKD(A, FrankId, 'ctf_Ash', EveId) = '1/0') and
+    (PMDeaths(A, EveId, 'ctf_Ash') = 7) and (RivalKD(A, EveId, 'ctf_Ash', FrankId) = '0/1') and
+    (RivalsText(A, EveId, 'ctf_Ash') = RivalsText(C, EveId, 'ctf_Ash')));
   { the account registered on C without the database goes into the account of the same computer
     that A made meanwhile, with its password - as at the first start of a server (JoinDatabase) }
   T0 := MonoMs;

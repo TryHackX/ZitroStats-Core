@@ -19,6 +19,7 @@ type
     ReloadTime: LongInt;  { ticks }
     FireInterval: LongInt;
     StartUpTime: LongInt;
+    Inherit: Single;      { "InheritedVelocity": the share of the shooter's own velocity a bullet gets }
   end;
 
 var
@@ -116,6 +117,16 @@ begin
   SetDef(WSLOT_CLUSTER, 1500, 5, 1.0, 1.0, 1.0, BS_CLUSTER, 1);
   for i := 0 to WSLOT_COUNT - 1 do
     SetTiming(i, 0, 0, 0);
+  { half of the shooter's velocity goes into a bullet; blades, fists and the stationary gun get
+    none, a thrown grenade all of it }
+  for i := 0 to WSLOT_COUNT - 1 do
+    WeaponDefs[i].Inherit := 0.5;
+  WeaponDefs[WEP_KNIFE].Inherit := 0;
+  WeaponDefs[WEP_CHAINSAW].Inherit := 0;
+  WeaponDefs[WSLOT_M2].Inherit := 0;
+  WeaponDefs[WSLOT_FISTS].Inherit := 0;
+  WeaponDefs[WSLOT_FRAG].Inherit := 1;
+  WeaponDefs[WSLOT_CLUSTER].Inherit := 1;
   SetTiming(0, 60, 10, 0);
   SetTiming(1, 87, 24, 0);
   SetTiming(2, 105, 6, 0);
@@ -646,7 +657,8 @@ begin
       else if Key = 'ammo' then WeaponDefs[S].Ammo := StrToIntDef(Val, WeaponDefs[S].Ammo)
       else if Key = 'reloadtime' then WeaponDefs[S].ReloadTime := StrToIntDef(Val, WeaponDefs[S].ReloadTime)
       else if Key = 'fireinterval' then WeaponDefs[S].FireInterval := StrToIntDef(Val, WeaponDefs[S].FireInterval)
-      else if Key = 'startuptime' then WeaponDefs[S].StartUpTime := StrToIntDef(Val, WeaponDefs[S].StartUpTime);
+      else if Key = 'startuptime' then WeaponDefs[S].StartUpTime := StrToIntDef(Val, WeaponDefs[S].StartUpTime)
+      else if Key = 'inheritedvelocity' then WeaponDefs[S].Inherit := StrToFloatDef(Val, WeaponDefs[S].Inherit, FS);
     end;
     WeaponsIniLoaded := Path;
     Result := True;

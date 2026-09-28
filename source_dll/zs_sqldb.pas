@@ -30,7 +30,14 @@ unit zs_sqldb;
   A server that starts without the database exchanges by the numbers of its files only once it
   finds its join mark in the database: one that never joined it (or whose join went in while the
   rest of its start failed) writes nothing until its next start, which joins it, instead of
-  writing its accounts over the accounts that have those numbers in the database. }
+  writing its accounts over the accounts that have those numbers in the database.
+
+  The player-on-map records ([Matrix], zs_matrix) go the same way in a table of their own
+  (zs_db_player_maps, one row per account number and map name): merged three ways inside the push
+  behind a savepoint - whatever goes wrong there is taken back alone and the rest of the exchange
+  goes in - and read back from a seq of their own. A record of an account the database has no
+  number for yet waits until the account went in; a removed record is a row with deleted = 1 and
+  no data, so the other servers learn of the removal. }
 
 {$mode objfpc}{$H+}
 
@@ -54,7 +61,7 @@ function SqlStatusText(E: TZSEngine): AnsiString;
 implementation
 
 uses
-  DateUtils, md5, mysqlwire, zs_crash, zs_service;
+  DateUtils, md5, mysqlwire, zs_crash, zs_service, zs_matrix;
 
 const
   SK_ACCOUNT = 1;
@@ -62,9 +69,11 @@ const
   SK_SERVER = 3;
   SK_SEASON = 4;
   SK_DELETE = 5;
+  SK_PLAYERMAP = 6;       { a player-on-map record ([Matrix]); Snap = '' is its removal }
   ID_BLOCK = 200;
   ID_LOW = 50;
   PUSH_CHUNK = 200;
+  PM_PUSH_CHUNK = 400;    { player-on-map records in one exchange }
 
   ACC_COLS: array[0..15] of AnsiString = (
     'id INT NOT NULL', 'steam VARCHAR(40) NULL', 'hwid_key VARCHAR(32) NULL', 'name VARCHAR(64) NOT NULL DEFAULT ''''',
@@ -93,6 +102,14 @@ const
   JOB_COLS: array[0..3] of AnsiString = ('job VARCHAR(32) NOT NULL', 'day INT NOT NULL DEFAULT 0',
     'server_id INT NOT NULL DEFAULT 0', 'taken_at DATETIME NULL');
   JOB_KEYS = 'PRIMARY KEY (job)';
+  { [Matrix]: the player-on-map records, by account and map name; a removed record is a row with
+    deleted = 1 and no data, so the other servers learn of the removal }
+  PM_COLS: array[0..11] of AnsiString = (
+    'account_id INT NOT NULL', 'map_name VARCHAR(64) NOT NULL', 'kills INT NOT NULL DEFAULT 0',
+    'deaths INT NOT NULL DEFAULT 0', 'playtime_sec BIGINT NOT NULL DEFAULT 0', 'last_played DATETIME NULL',
+    'data MEDIUMBLOB NULL', 'version BIGINT NOT NULL DEFAULT 0', 'seq BIGINT NOT NULL DEFAULT 0',
+    'deleted TINYINT NOT NULL DEFAULT 0', 'updated_by INT NOT NULL DEFAULT 0', 'updated_at DATETIME NULL');
+  PM_KEYS = 'PRIMARY KEY (account_id, map_name), KEY idx_seq (seq)';
 
 type
   TSyncItem = record
@@ -112,7 +129,8 @@ type
 
   TSyncOut = record
     Kind: Byte;
-    Id, NewId: LongInt;     { NewId: the number in the database when it is not Id }
+    Id, NewId: LongInt;     { NewId: the number in the database when it is not Id; a player-on-map
+                              record that did not go in (its account is gone there): -1 }
     Key: AnsiString;
     Data: AnsiString;
     Version: Int64;
@@ -139,6 +157,10 @@ type
     Joined, NotJoined: Boolean;  { the answer to CheckJoin: this server's join mark is there, or not }
     SeqBack: Boolean;            { the seq of the database is below the one this server read last }
     CommitUnsure: Boolean;       { the push failed after its COMMIT was sent: it may be in }
+    { the player-on-map records: where their reading got to, and what the database answered when
+      their part of the exchange failed (the rest of it went on) }
+    PMSeq: Int64;
+    PMError: AnsiString;
   end;
 
   TSqlThread = class(TThread)
@@ -153,6 +175,8 @@ type
     FItems: TSyncItems;
     FJobs: TSyncJobs;
     FPullSeq: Int64;
+    FPMPullSeq: Int64;      { the player-on-map records are read from their own place }
+    FPullTop: Int64;        { the seq of the database the pull read up to }
     FNeedIds: Boolean;
     FCheckJoin: Boolean;
     FCommitSeq: Int64;      { the seq of a push whose COMMIT was sent and not answered yet }
@@ -162,7 +186,9 @@ type
     procedure Disconnect;
     procedure Add(const O: TSyncOut);
     procedure Push;
+    procedure PushPlayerMaps(const SeqText, Sid, Stamp: AnsiString);
     procedure Pull;
+    procedure PullPlayerMaps;
     procedure TakeIds;
     procedure ClaimJobs;
     function Landed(Seq: Int64): Boolean;
@@ -171,7 +197,8 @@ type
   public
     constructor Create(E: TZSEngine);
     destructor Destroy; override;
-    procedure Submit(const Items: TSyncItems; const Jobs: TSyncJobs; PullSeq: Int64; NeedIds, CheckJoin: Boolean);
+    procedure Submit(const Items: TSyncItems; const Jobs: TSyncJobs; PullSeq, PMPullSeq: Int64; NeedIds,
+      CheckJoin: Boolean);
     function TakeResult(out R: TSyncResult): Boolean;
     procedure StopAndWait;
   end;
@@ -187,8 +214,11 @@ type
     Thread: TSqlThread;
     Engine: TZSEngine;
     Busy: Boolean;
-    InFlight: TStringList;     { 'A<id>', 'M<name>', 'S', 'N<season>', 'D<id>' -> TSnapObj }
+    InFlight: TStringList;     { 'A<id>', 'M<name>', 'S', 'N<season>', 'D<id>', 'P<id>|<map>' (a player-on-map
+                                 record), 'Q<id>|<map>' (its removal) -> TSnapObj }
     PullSeq: Int64;
+    PMPullSeq: Int64;          { the seq the player-on-map records were read up to }
+    PMWarned: AnsiString;      { the last failure of their part of the exchange that was reported }
     NeedFull: Boolean;         { read the whole database again on the next exchange }
     Online: Boolean;
     EverOnline: Boolean;
@@ -269,6 +299,20 @@ function DecodeS(const Data: AnsiString; var S: TServerRecords): Boolean;
 begin
   ClearServer(S);
   Result := (Data = '') or DecodeServer(Data, S);
+end;
+
+{ a player-on-map record; '' is an empty one (a new record, a removal, a removed row) }
+function DecodePM(const Data: AnsiString; var R: TPlayerMapStats): Boolean;
+begin
+  ClearPlayerMap(R);
+  Result := (Data = '') or DecodePlayerMap(Data, R);
+end;
+
+{ the name of a player-on-map record among the batch on its way (InFlight: 'P' + this, the removal
+  'Q' + this) }
+function PMKey(AccountId: LongInt; const MapName: AnsiString): AnsiString;
+begin
+  Result := IntToStr(AccountId) + '|' + MapName;
 end;
 
 { An account without Steam is the account of a computer, as on one server: the key of its HWID,
@@ -434,7 +478,7 @@ procedure TSqlThread.Push;
 var
   Seq: Int64;
   R: TMyResult;
-  i, k, Target, Hops: LongInt;
+  i, k, Target, Hops, Mark: LongInt;
   Cur, Base, Remote: TPlayerProfile;
   MC, MB, MR: TMapProfile;
   SC, SB, SR: TServerRecords;
@@ -735,6 +779,28 @@ begin
           MyBin(FItems[i].Snap) + ', ' + SeqText + ', ' + Sid + ', ' + Stamp + ') ON DUPLICATE KEY UPDATE data = VALUES(data), ' +
           'seq = VALUES(seq), updated_by = VALUES(updated_by), updated_at = VALUES(updated_at)');
 
+    { the player-on-map records behind a savepoint: whatever goes wrong there is taken back alone,
+      everything above goes in all the same, and the records wait for the next exchange - only a
+      broken connection fails the whole push, as anywhere above }
+    if not FStop then
+    begin
+      Mark := FOutCount;
+      FConn.Exec('SAVEPOINT zs_pm');
+      try
+        PushPlayerMaps(SeqText, Sid, Stamp);
+        FConn.Exec('RELEASE SAVEPOINT zs_pm');
+      except
+        on Ex: Exception do
+        begin
+          if (Ex is EMyError) and (EMyError(Ex).Code = 0) then
+            raise;
+          FConn.Exec('ROLLBACK TO SAVEPOINT zs_pm');
+          FOutCount := Mark;
+          FRes.PMError := Ex.Message;
+        end;
+      end;
+    end;
+
     FConn.Exec('UPDATE zs_db_meta SET value = ' + SeqText + ' WHERE name = ''seq''');
     { the mark of this server's last write: a COMMIT whose answer is lost can be looked up (Landed) }
     FConn.Exec('INSERT INTO zs_db_meta (name, value) VALUES (' + MyStr('push_' + IntToStr(FServerId)) + ', ' + SeqText +
@@ -756,6 +822,134 @@ begin
   FRes.Seq := Max(FRes.Seq, Seq);
 end;
 
+{ The player-on-map records of this server go in, inside the push: each row read with a lock,
+  merged three ways (Merge3PlayerMap) and written with the seq of the push; a record with nothing
+  left becomes a removed row. A record of an account the database does not have (any more) does not
+  go in - the exchange brings that account's removal - but a removal always does. }
+procedure TSqlThread.PushPlayerMaps(const SeqText, Sid, Stamp: AnsiString);
+var
+  i, n: LongInt;
+  R: TMyResult;
+  Cur, Base, Remote: TPlayerMapStats;
+  Version: Int64;
+  Data, Name, Ids: AnsiString;
+  Alive: TStringList;
+  RowDeleted, Empty: Boolean;
+  O: TSyncOut;
+
+  { the accounts of the list that the database has }
+  procedure AddAlive(const List: AnsiString);
+  var
+    Q: TMyResult;
+    j: LongInt;
+  begin
+    Q := FConn.Query('SELECT id FROM zs_db_accounts WHERE deleted = 0 AND id IN (' + List + ')');
+    try
+      for j := 0 to Q.RowCount - 1 do
+        Alive.Add(IntToStr(Q.Int(j, 0)));
+    finally
+      Q.Free;
+    end;
+  end;
+
+begin
+  Alive := TStringList.Create;
+  try
+    Alive.Sorted := True;
+    Alive.Duplicates := dupIgnore;
+    { one question per 500 accounts }
+    Ids := '';
+    n := 0;
+    for i := 0 to High(FItems) do
+      if (FItems[i].Kind = SK_PLAYERMAP) and (FItems[i].Snap <> '') then
+      begin
+        if Ids <> '' then
+          Ids := Ids + ', ';
+        Ids := Ids + MyInt(FItems[i].Id);
+        Inc(n);
+        if n >= 500 then
+        begin
+          AddAlive(Ids);
+          Ids := '';
+          n := 0;
+        end;
+      end;
+    if Ids <> '' then
+      AddAlive(Ids);
+
+    for i := 0 to High(FItems) do
+    begin
+      if (FItems[i].Kind <> SK_PLAYERMAP) or FStop then
+        Continue;
+      if not DecodePM(FItems[i].Snap, Cur) or not DecodePM(FItems[i].Base, Base) then
+        Continue;
+      Name := MyStrMax(CodepageToUtf8(FItems[i].Key, FCodepage), 64);
+      R := FConn.Query('SELECT version, data, deleted FROM zs_db_player_maps WHERE account_id = ' + MyInt(FItems[i].Id) +
+        ' AND map_name = ' + Name + ' FOR UPDATE');
+      try
+        if R.RowCount > 0 then
+        begin
+          Version := R.Int(0, 0);
+          Data := R.Str(0, 1);
+          RowDeleted := R.Int(0, 2) <> 0;
+        end
+        else
+        begin
+          Version := 0;
+          Data := '';
+          RowDeleted := False;
+        end;
+      finally
+        R.Free;
+      end;
+      if RowDeleted then
+        Data := '';
+      O.Kind := SK_PLAYERMAP;
+      O.Id := FItems[i].Id;
+      O.NewId := 0;
+      O.Key := FItems[i].Key;
+      { 1: the answer to a removal (a record and its removal may go in the same push) }
+      O.MergedInto := Ord(FItems[i].Snap = '');
+      O.Pushed := True;
+      if (FItems[i].Snap <> '') and (Alive.IndexOf(IntToStr(FItems[i].Id)) < 0) then
+      begin
+        O.NewId := -1;
+        O.Data := Data;
+        O.Version := Version;
+        O.Deleted := True;
+        Add(O);
+        Continue;
+      end;
+      if not DecodePM(Data, Remote) then
+        Continue;
+      Merge3PlayerMap(Cur, Base, Remote);
+      Cur.AccountId := FItems[i].Id;
+      Cur.MapName := FItems[i].Key;
+      Empty := PlayerMapEmpty(Cur);
+      if Empty then
+        O.Data := ''
+      else
+        O.Data := EncodePlayerMap(Cur);
+      O.Version := Version + 1;
+      O.Deleted := Empty;
+      if Empty then
+        Data := 'NULL'
+      else
+        Data := MyBin(O.Data);
+      FConn.Exec('INSERT INTO zs_db_player_maps (account_id, map_name, kills, deaths, playtime_sec, last_played, data, ' +
+        'version, seq, deleted, updated_by, updated_at) VALUES (' + MyInt(FItems[i].Id) + ', ' + Name + ', ' +
+        MyInt(Cur.Kills) + ', ' + MyInt(Cur.Deaths) + ', ' + MyInt(Cur.TimePlayed) + ', ' + MyDate(Cur.LastPlayed) + ', ' +
+        Data + ', ' + MyInt(O.Version) + ', ' + SeqText + ', ' + MyInt(Ord(Empty)) + ', ' + Sid + ', ' + Stamp +
+        ') ON DUPLICATE KEY UPDATE kills = VALUES(kills), deaths = VALUES(deaths), playtime_sec = VALUES(playtime_sec), ' +
+        'last_played = VALUES(last_played), data = VALUES(data), version = VALUES(version), seq = VALUES(seq), ' +
+        'deleted = VALUES(deleted), updated_by = VALUES(updated_by), updated_at = VALUES(updated_at)');
+      Add(O);
+    end;
+  finally
+    Alive.Free;
+  end;
+end;
+
 { what the other servers wrote since the newest change this server knows }
 procedure TSqlThread.Pull;
 var
@@ -767,6 +961,7 @@ begin
   Top := MetaValue(FConn, 'seq', False);
   if Top < 0 then
     raise EMyError.CreateCode(0, 'the row seq of zs_db_meta is missing');
+  FPullTop := Top;
   { the seq went back (a database restored from a backup, or another one): everything up to where
     it stands now is read again - the versions leave out what is known - and the engine says the
     server should be started again. High(Int64) asks for no changes at all (PushPending). }
@@ -869,6 +1064,62 @@ begin
     FRes.Seq := Max(FRes.Seq, Top);
 end;
 
+{ The player-on-map records the other servers wrote, read from a place of their own (FPMPullSeq)
+  up to where Pull read: an error the database answers here leaves them for the next exchange and
+  lets the rest of this one go on; a broken connection fails the pull as anywhere in it. }
+procedure TSqlThread.PullPlayerMaps;
+var
+  C: TMyCursor;
+  From: Int64;
+  O: TSyncOut;
+begin
+  FRes.PMSeq := FPMPullSeq;
+  { High(Int64): no changes asked for (PushPending) }
+  if FPMPullSeq = High(Int64) then
+    Exit;
+  From := FPMPullSeq;
+  { the seq went back: everything again (the versions leave out what is known) }
+  if FPullTop < From then
+    From := 0;
+  if FPullTop <= From then
+  begin
+    FRes.PMSeq := FPullTop;
+    Exit;
+  end;
+  try
+    C := FConn.Open('SELECT account_id, map_name, version, deleted, data FROM zs_db_player_maps WHERE seq > ' +
+      MyInt(From) + ' AND seq <= ' + MyInt(FPullTop) + ' AND updated_by <> ' + MyInt(FServerId));
+    try
+      while C.Next do
+      begin
+        O.Kind := SK_PLAYERMAP;
+        O.Id := C.Int(0);
+        O.NewId := 0;
+        O.Key := Utf8ToCodepage(C.Str(1), FCodepage);
+        O.Version := C.Int(2);
+        O.Deleted := C.Int(3) <> 0;
+        if O.Deleted then
+          O.Data := ''
+        else
+          O.Data := C.Str(4);
+        O.MergedInto := 0;
+        O.Pushed := False;
+        Add(O);
+      end;
+    finally
+      C.Free;
+    end;
+    FRes.PMSeq := FPullTop;
+  except
+    on Ex: EMyError do
+    begin
+      if Ex.Code = 0 then
+        raise;
+      FRes.PMError := Ex.Message;
+    end;
+  end;
+end;
+
 { a block of account numbers for the accounts this server makes }
 procedure TSqlThread.TakeIds;
 var
@@ -959,6 +1210,8 @@ begin
     FRes.NotJoined := False;
     FRes.SeqBack := False;
     FRes.CommitUnsure := False;
+    FRes.PMSeq := FPMPullSeq;
+    FRes.PMError := '';
     FCommitSeq := 0;
     try
       Connect;
@@ -979,6 +1232,7 @@ begin
         try
           Pull;
           Pulled := True;
+          PullPlayerMaps;
           if FNeedIds then
             TakeIds;
           if Length(FJobs) > 0 then
@@ -1028,13 +1282,15 @@ begin
   end;
 end;
 
-procedure TSqlThread.Submit(const Items: TSyncItems; const Jobs: TSyncJobs; PullSeq: Int64; NeedIds, CheckJoin: Boolean);
+procedure TSqlThread.Submit(const Items: TSyncItems; const Jobs: TSyncJobs; PullSeq, PMPullSeq: Int64; NeedIds,
+  CheckJoin: Boolean);
 begin
   EnterCriticalSection(FLock);
   try
     FItems := Items;
     FJobs := Copy(Jobs);
     FPullSeq := PullSeq;
+    FPMPullSeq := PMPullSeq;
     FNeedIds := NeedIds;
     FCheckJoin := CheckJoin;
     FHave := True;
@@ -1184,6 +1440,9 @@ begin
           here too - the other one's own changes and this one's since the snapshot go on top }
         if not DecodeP(Snap.Data, B) or not DecodeP(O.Data, M) or not DecodeP(E.DB.Profiles[Other]^.SyncBase, OB) then
           Exit;
+        { its records of the maps as well: a new account's never went in (they wait for its number),
+          an account merged away on another server had its rows added there already }
+        E.DB.PM.MergeAccount(O.Id, O.NewId, E.DB.Profiles[Idx]^.SyncBase <> '');
         T := E.DB.Profiles[Other]^;
         UniqueProfileLists(T);
         Merge3Profile(T, OB, M);
@@ -1210,6 +1469,11 @@ begin
         Inc(AgainCount);
         Exit;
       end;
+      { an account the database had (merged away on another server): its rows of the maps went into
+        the other account there, so its records here follow as a merge the database made; a new
+        account's records simply take the new number (ChangeProfileId) }
+      if E.DB.Profiles[Idx]^.SyncBase <> '' then
+        E.DB.PM.MergeAccount(O.Id, O.NewId, True);
       E.DB.ChangeProfileId(Idx, O.NewId);
       FollowSlots(E, O.Id, O.NewId);
       { another account may have had the number this one had: read everything again once }
@@ -1242,6 +1506,12 @@ begin
       Inc(AgainCount);
       Exit;
     end;
+    { its records of the maps: added to the account it went into, as the other server did with the
+      rows; otherwise they go with it (that server removed the rows) }
+    if E.DB.Valid(Other) then
+      E.DB.PM.MergeAccount(O.Id, O.MergedInto, True)
+    else
+      E.DB.PM.RemoveAccount(O.Id, True, False);
     E.DB.DeleteProfile(Idx);
     Exit;
   end;
@@ -1365,6 +1635,128 @@ begin
   E.DB.TouchSeason(n);
 end;
 
+{ A player-on-map row: the answer to this server's push (put under what this server added since),
+  or a change of another server (merged three ways into the record here, or a record new here). A
+  removed row takes out what this server had of the database's; a record with nothing left goes. }
+procedure ApplyPlayerMap(E: TZSEngine; St: TSqlState; const O: TSyncOut);
+var
+  Place, k: LongInt;
+  R: PPlayerMapStats;
+  B, Rm: TPlayerMapStats;
+  Gone: TPMGoneArray;
+begin
+  Place := E.DB.PM.FindNo(O.Id, E.DB.PM.MapNumber(O.Key, False));
+  if O.Pushed then
+  begin
+    { the account is gone there: the exchange brings its removal }
+    if O.NewId < 0 then
+      Exit;
+    { a removal that went in: what other servers added since the base stays in the database, and
+      so it does here (a reset here takes only this server's part away) }
+    if O.MergedInto = 1 then
+    begin
+      if (Place < 0) and (O.Data <> '') and E.DB.Valid(E.DB.IndexOfId(O.Id)) and DecodePM(O.Data, Rm) then
+      begin
+        Place := E.DB.PM.Obtain(O.Id, E.DB.PM.MapNumber(O.Key, True), 0);
+        if Place < 0 then
+          Exit;
+        R := E.DB.PM.Items[Place];
+        MergePlayerMapInto(R^, Rm, 0);
+        R^.SyncBase := O.Data;
+        R^.SyncVersion := O.Version;
+        E.DB.PM.Touch(Place);
+      end;
+      Exit;
+    end;
+    k := St.InFlight.IndexOf('P' + PMKey(O.Id, O.Key));
+    if k < 0 then
+      Exit;
+    if Place < 0 then
+    begin
+      { removed here while the push was on its way: the removal goes in from what the database has now }
+      if O.Data <> '' then
+      begin
+        SetLength(Gone, 1);
+        Gone[0].AccountId := O.Id;
+        Gone[0].MapName := O.Key;
+        Gone[0].Base := O.Data;
+        E.DB.PM.RequeueGone(Gone);
+      end;
+      Exit;
+    end;
+    if not DecodePM(TSnapObj(St.InFlight.Objects[k]).Data, B) or not DecodePM(O.Data, Rm) then
+      Exit;
+  end
+  else
+  begin
+    if Place < 0 then
+    begin
+      { a record another server made, of an account this server has }
+      if O.Deleted or (O.Data = '') or not E.DB.Valid(E.DB.IndexOfId(O.Id)) or not DecodePM(O.Data, Rm) then
+        Exit;
+      Place := E.DB.PM.Obtain(O.Id, E.DB.PM.MapNumber(O.Key, True), 0);
+      if Place < 0 then
+        Exit;
+      R := E.DB.PM.Items[Place];
+      MergePlayerMapInto(R^, Rm, 0);
+      R^.SyncBase := O.Data;
+      R^.SyncVersion := O.Version;
+      E.DB.PM.Touch(Place);
+      Exit;
+    end;
+    { older than this server's own push, which read it and merged it }
+    if O.Version <= E.DB.PM.Items[Place]^.SyncVersion then
+      Exit;
+    if not DecodePM(E.DB.PM.Items[Place]^.SyncBase, B) or not DecodePM(O.Data, Rm) then
+      Exit;
+  end;
+  R := E.DB.PM.Items[Place];
+  Merge3PlayerMap(R^, B, Rm);
+  R^.SyncBase := O.Data;
+  R^.SyncVersion := O.Version;
+  if PlayerMapEmpty(R^) then
+    E.DB.PM.Remove(Place)
+  else
+    E.DB.PM.Touch(Place);
+end;
+
+{ the player-on-map records on their way that got no answer (their part of the push was taken
+  back): they go again with the next exchange }
+procedure RequeuePlayerMaps(E: TZSEngine; St: TSqlState; const Answered: TStringList);
+var
+  k, Place, Bar: LongInt;
+  Key, Name: AnsiString;
+  Id: LongInt;
+  Gone: TPMGoneArray;
+begin
+  for k := 0 to St.InFlight.Count - 1 do
+  begin
+    Key := St.InFlight[k];
+    if (Key = '') or not (Key[1] in ['P', 'Q']) or (Answered.IndexOf(Key) >= 0) then
+      Continue;
+    Bar := Pos('|', Key);
+    if Bar <= 2 then
+      Continue;
+    Id := StrToIntDef(Copy(Key, 2, Bar - 2), 0);
+    Name := Copy(Key, Bar + 1, MaxInt);
+    if Key[1] = 'Q' then
+    begin
+      SetLength(Gone, 1);
+      Gone[0].AccountId := Id;
+      Gone[0].MapName := Name;
+      Gone[0].Base := TSnapObj(St.InFlight.Objects[k]).Base;
+      E.DB.PM.RequeueGone(Gone);
+      Continue;
+    end;
+    Place := E.DB.PM.FindNo(Id, E.DB.PM.MapNumber(Name, False));
+    if Place >= 0 then
+    begin
+      E.DB.PM.Items[Place]^.SyncDirty := False;
+      E.DB.PM.SyncMark(Place);
+    end;
+  end;
+end;
+
 { ---------------- what waits for the database, beside the files ---------------- }
 
 const
@@ -1380,6 +1772,12 @@ type
   TPendMap = record
     Name, Base: AnsiString;
   end;
+  TPendPM = record
+    AccountId: LongInt;
+    MapName: AnsiString;
+    IsNew: Boolean;
+    Base: AnsiString;
+  end;
   TPending = record
     Accounts: array of TPendAccount;
     Maps: array of TPendMap;
@@ -1387,6 +1785,10 @@ type
     ServerBase: AnsiString;
     Seasons: array of LongInt;
     Deleted: TSyncDeletedArray;
+    { the player-on-map records and their removals, after everything above (a file of an older
+      library ends before them) }
+    PlayerMaps: array of TPendPM;
+    PMGone: TPMGoneArray;
   end;
 
 function PendingPath(E: TZSEngine): AnsiString;
@@ -1399,12 +1801,13 @@ end;
 procedure WritePending(E: TZSEngine; St: TSqlState);
 var
   Pend: TPending;
-  k, n, Idx: LongInt;
+  k, n, Idx, Bar: LongInt;
   P: PPlayerProfile;
+  PR: PPlayerMapStats;
   SI: TIntArray;
   D: TSyncDeletedArray;
   FS: TFileStream;
-  Path: AnsiString;
+  Path, Key: AnsiString;
 
   procedure PutStr(const V: AnsiString);
   var
@@ -1439,6 +1842,37 @@ begin
   Pend.Maps := nil;
   Pend.Seasons := nil;
   Pend.Deleted := nil;
+  Pend.PlayerMaps := nil;
+  Pend.PMGone := nil;
+  { the player-on-map records marked or on their way, and the removals waiting or on their way }
+  n := 0;
+  for k := 0 to E.DB.PM.Places - 1 do
+  begin
+    PR := E.DB.PM.Items[k];
+    if (PR = nil) or (not PR^.SyncDirty and (St.InFlight.IndexOf('P' + PMKey(PR^.AccountId, PR^.MapName)) < 0)) then
+      Continue;
+    if n >= Length(Pend.PlayerMaps) then
+      SetLength(Pend.PlayerMaps, n * 2 + 16);
+    Pend.PlayerMaps[n].AccountId := PR^.AccountId;
+    Pend.PlayerMaps[n].MapName := PR^.MapName;
+    Pend.PlayerMaps[n].IsNew := PR^.SyncBase = '';
+    Pend.PlayerMaps[n].Base := PR^.SyncBase;
+    Inc(n);
+  end;
+  SetLength(Pend.PlayerMaps, n);
+  Pend.PMGone := E.DB.PM.GonePending;
+  for k := 0 to St.InFlight.Count - 1 do
+  begin
+    Key := St.InFlight[k];
+    Bar := Pos('|', Key);
+    if (Key = '') or (Key[1] <> 'Q') or (Bar <= 2) then
+      Continue;
+    n := Length(Pend.PMGone);
+    SetLength(Pend.PMGone, n + 1);
+    Pend.PMGone[n].AccountId := StrToIntDef(Copy(Key, 2, Bar - 2), 0);
+    Pend.PMGone[n].MapName := Copy(Key, Bar + 1, MaxInt);
+    Pend.PMGone[n].Base := TSnapObj(St.InFlight.Objects[k]).Base;
+  end;
   n := 0;
   for k := 0 to E.DB.ProfileCount - 1 do
   begin
@@ -1492,7 +1926,7 @@ begin
   Pend.Deleted := D;
   try
     if (Length(Pend.Accounts) = 0) and (Length(Pend.Maps) = 0) and not Pend.HasServer and (Length(Pend.Seasons) = 0) and
-       (Length(Pend.Deleted) = 0) then
+       (Length(Pend.Deleted) = 0) and (Length(Pend.PlayerMaps) = 0) and (Length(Pend.PMGone) = 0) then
     begin
       if FileExists(Path) then
         DeleteFile(Path);
@@ -1528,6 +1962,22 @@ begin
       begin
         PutInt(Pend.Deleted[k].Id);
         PutInt(Pend.Deleted[k].MergedInto);
+      end;
+      { [Matrix], after the rest: an older library reads the file up to here }
+      PutInt(Length(Pend.PlayerMaps));
+      for k := 0 to High(Pend.PlayerMaps) do
+      begin
+        PutInt(Pend.PlayerMaps[k].AccountId);
+        PutStr(Pend.PlayerMaps[k].MapName);
+        PutInt(Ord(Pend.PlayerMaps[k].IsNew));
+        PutStr(Pend.PlayerMaps[k].Base);
+      end;
+      PutInt(Length(Pend.PMGone));
+      for k := 0 to High(Pend.PMGone) do
+      begin
+        PutInt(Pend.PMGone[k].AccountId);
+        PutStr(Pend.PMGone[k].MapName);
+        PutStr(Pend.PMGone[k].Base);
       end;
     finally
       FS.Free;
@@ -1574,6 +2024,8 @@ begin
   Pend.ServerBase := '';
   Pend.Seasons := nil;
   Pend.Deleted := nil;
+  Pend.PlayerMaps := nil;
+  Pend.PMGone := nil;
   if not FileExists(PendingPath(E)) then
     Exit;
   try
@@ -1605,6 +2057,23 @@ begin
       SetLength(Pend.Deleted, n);
       for k := 0 to n - 1 do
         if not GetInt(Pend.Deleted[k].Id) or not GetInt(Pend.Deleted[k].MergedInto) then Exit;
+      { the player-on-map records ([Matrix]); a file an older library wrote ends before them }
+      if GetInt(n) then
+      begin
+        if (n < 0) or (n > FS.Size) then Exit;
+        SetLength(Pend.PlayerMaps, n);
+        for k := 0 to n - 1 do
+        begin
+          if not GetInt(Pend.PlayerMaps[k].AccountId) or not GetStr(Pend.PlayerMaps[k].MapName) or not GetInt(V) or
+             not GetStr(Pend.PlayerMaps[k].Base) then Exit;
+          Pend.PlayerMaps[k].IsNew := V <> 0;
+        end;
+        if not GetInt(n) or (n < 0) or (n > FS.Size) then Exit;
+        SetLength(Pend.PMGone, n);
+        for k := 0 to n - 1 do
+          if not GetInt(Pend.PMGone[k].AccountId) or not GetStr(Pend.PMGone[k].MapName) or
+             not GetStr(Pend.PMGone[k].Base) then Exit;
+      end;
       Result := True;
     finally
       FS.Free;
@@ -1650,6 +2119,19 @@ begin
       if E.DB.Seasons[i].Id = Pend.Seasons[k] then
         E.DB.TouchSeason(i);
   E.DB.RequeueDeleted(Pend.Deleted);
+  for k := 0 to High(Pend.PlayerMaps) do
+  begin
+    Idx := E.DB.PM.FindNo(Pend.PlayerMaps[k].AccountId, E.DB.PM.MapNumber(Pend.PlayerMaps[k].MapName, False));
+    if Idx < 0 then
+      Continue;
+    if Pend.PlayerMaps[k].IsNew then
+      E.DB.PM.Items[Idx]^.SyncBase := ''
+    else
+      E.DB.PM.Items[Idx]^.SyncBase := Pend.PlayerMaps[k].Base;
+    E.DB.PM.Items[Idx]^.SyncDirty := False;
+    E.DB.PM.SyncMark(Idx);
+  end;
+  E.DB.PM.RequeueGone(Pend.PMGone);
 end;
 
 { the batch could not be written: its changes wait for the next one }
@@ -1658,6 +2140,7 @@ var
   k, Idx: LongInt;
   Key: AnsiString;
   D: TSyncDeletedArray;
+  Empty: TStringList;
 begin
   D := nil;
   for k := 0 to St.InFlight.Count - 1 do
@@ -1697,6 +2180,13 @@ begin
     end;
   end;
   E.DB.RequeueDeleted(D);
+  { the player-on-map records and their removals }
+  Empty := TStringList.Create;
+  try
+    RequeuePlayerMaps(E, St, Empty);
+  finally
+    Empty.Free;
+  end;
 end;
 
 { nothing is exchanged any more until the server starts again: the numbers in memory are not the
@@ -1718,6 +2208,7 @@ procedure ApplyResult(E: TZSEngine; St: TSqlState; const R: TSyncResult);
 var
   i, k, AgainCount: LongInt;
   Again: TIntArray;
+  Answered: TStringList;
 begin
   if R.Joined then
     St.Joined := True;
@@ -1768,29 +2259,73 @@ begin
   end;
   Again := nil;
   AgainCount := 0;
-  E.DB.BeginRemote;
+  Answered := TStringList.Create;
   try
-    for i := 0 to High(R.Rows) do
-    begin
-      if R.Rows[i].Pushed then
-        Inc(St.Pushed)
-      else
-        Inc(St.Pulled);
-      case R.Rows[i].Kind of
-        SK_ACCOUNT: ApplyAccount(E, St, R.Rows[i], Again, AgainCount);
-        SK_MAP: ApplyMap(E, St, R.Rows[i]);
-        SK_SERVER: ApplyServer(E, St, R.Rows[i]);
-        SK_SEASON: ApplySeason(E, R.Rows[i]);
+    Answered.Sorted := True;
+    Answered.Duplicates := dupIgnore;
+    Answered.CaseSensitive := True;
+    E.DB.BeginRemote;
+    { accounts another server removed by the thousand: the rival entries naming them go once }
+    E.DB.PM.HoldRivalRemovals;
+    try
+      for i := 0 to High(R.Rows) do
+      begin
+        if R.Rows[i].Pushed then
+          Inc(St.Pushed)
+        else
+          Inc(St.Pulled);
+        case R.Rows[i].Kind of
+          SK_ACCOUNT: ApplyAccount(E, St, R.Rows[i], Again, AgainCount);
+          SK_MAP: ApplyMap(E, St, R.Rows[i]);
+          SK_SERVER: ApplyServer(E, St, R.Rows[i]);
+          SK_SEASON: ApplySeason(E, R.Rows[i]);
+          SK_PLAYERMAP:
+            begin
+              if R.Rows[i].Pushed and (R.Rows[i].MergedInto = 1) then
+                Answered.Add('Q' + PMKey(R.Rows[i].Id, R.Rows[i].Key))
+              else if R.Rows[i].Pushed then
+                Answered.Add('P' + PMKey(R.Rows[i].Id, R.Rows[i].Key));
+              { a record that cannot be applied stays as it is here: the accounts, maps and the rest of
+                the exchange go on }
+              try
+                ApplyPlayerMap(E, St, R.Rows[i]);
+              except
+                on Ex: Exception do
+                  E.WriteServer('[ZitroStats] shared database: a player-on-map record of #' +
+                    IntToStr(R.Rows[i].Id) + ' was not applied (' + Ex.Message + ')');
+              end;
+            end;
+        end;
+      end;
+    finally
+      try
+        E.DB.PM.ReleaseRivalRemovals(True);
+      finally
+        E.DB.EndRemote;
       end;
     end;
+    for i := 0 to AgainCount - 1 do
+      E.DB.SyncMark(Again[i]);
+    { the player-on-map part of the push was taken back: its records go again next time }
+    if R.PMError <> '' then
+    begin
+      RequeuePlayerMaps(E, St, Answered);
+      if R.PMError <> St.PMWarned then
+        E.WriteServer('[ZitroStats] shared database: the player-on-map records wait for the next exchange (' +
+          R.PMError + ')');
+    end;
+    St.PMWarned := R.PMError;
   finally
-    E.DB.EndRemote;
+    Answered.Free;
   end;
-  for i := 0 to AgainCount - 1 do
-    E.DB.SyncMark(Again[i]);
-  { a seq that went back is taken as it is, or nothing would be read until it passes the old one }
-  if R.SeqBack or (R.Seq > St.PullSeq) then
+  { a seq that went back is taken as it is, or nothing would be read until it passes the old one.
+    High(Int64) asked for nothing (PushPending): an answer of it that comes late, after the start
+    gave up waiting for it, must not stop the reading for good }
+  if (R.Seq <> High(Int64)) and (R.SeqBack or (R.Seq > St.PullSeq)) then
     St.PullSeq := R.Seq;
+  { High(Int64) asked for nothing (PushPending) - also when that answer comes late }
+  if (R.PMSeq <> High(Int64)) and (R.SeqBack or (R.PMSeq > St.PMPullSeq)) then
+    St.PMPullSeq := R.PMSeq;
   for i := 0 to High(R.Jobs) do
   begin
     k := St.Jobs.IndexOf(R.Jobs[i].Job + '|' + IntToStr(R.Jobs[i].Day));
@@ -1809,17 +2344,21 @@ end;
   is read right after it). }
 procedure SubmitBatch(E: TZSEngine; St: TSqlState; All: Boolean = False);
 var
-  PIdx, MIdx, SIdx: TIntArray;
+  PIdx, MIdx, SIdx, PMIdx: TIntArray;
   Del: TSyncDeletedArray;
+  PMGone: TPMGoneArray;
   Srv: Boolean;
   Items: TSyncItems;
   Jobs: TSyncJobs;
-  n, k, j: LongInt;
+  n, k, j, m, AIdx: LongInt;
   P: PPlayerProfile;
+  PR: PPlayerMapStats;
   Snap: TSnapObj;
+  Key: AnsiString;
 begin
   E.DB.TakeSyncWork(PIdx, MIdx, Srv, SIdx, Del);
-  SetLength(Items, Length(PIdx) + Length(MIdx) + Length(SIdx) + Length(Del) + 1);
+  E.DB.PM.TakeSyncWork(PMIdx, PMGone);
+  SetLength(Items, Length(PIdx) + Length(MIdx) + Length(SIdx) + Length(Del) + Length(PMIdx) + Length(PMGone) + 1);
   n := 0;
   St.InFlight.Clear;
   for k := 0 to High(PIdx) do
@@ -1903,6 +2442,56 @@ begin
     St.InFlight.AddObject('D' + IntToStr(Del[k].Id), Snap);
     Inc(n);
   end;
+  { the player-on-map records ([Matrix]): the removals first, then the records - a record of an
+    account the database has no number for yet waits until the account went in, and PM_PUSH_CHUNK
+    records go at a time }
+  for k := 0 to High(PMGone) do
+  begin
+    Key := PMKey(PMGone[k].AccountId, PMGone[k].MapName);
+    if St.InFlight.IndexOf('Q' + Key) >= 0 then
+      Continue;
+    Items[n].Kind := SK_PLAYERMAP;
+    Items[n].Id := PMGone[k].AccountId;
+    Items[n].Key := PMGone[k].MapName;
+    Items[n].Snap := '';
+    Items[n].Base := PMGone[k].Base;
+    Snap := TSnapObj.Create;
+    Snap.Id := PMGone[k].AccountId;
+    Snap.Base := PMGone[k].Base;
+    St.InFlight.AddObject('Q' + Key, Snap);
+    Inc(n);
+  end;
+  m := 0;
+  for k := 0 to High(PMIdx) do
+  begin
+    PR := E.DB.PM.Items[PMIdx[k]];
+    if (PR = nil) or not PR^.SyncDirty then
+      Continue;
+    PR^.SyncDirty := False;
+    AIdx := E.DB.IndexOfId(PR^.AccountId);
+    if not E.DB.Valid(AIdx) then
+      Continue;
+    Key := PMKey(PR^.AccountId, PR^.MapName);
+    if (E.DB.Profiles[AIdx]^.SyncBase = '') or (not All and (m >= PM_PUSH_CHUNK)) or
+       (St.InFlight.IndexOf('P' + Key) >= 0) then
+    begin
+      E.DB.PM.SyncMark(PMIdx[k]);
+      Continue;
+    end;
+    Items[n].Kind := SK_PLAYERMAP;
+    Items[n].Id := PR^.AccountId;
+    Items[n].Key := PR^.MapName;
+    Items[n].Snap := EncodePlayerMap(PR^);
+    Items[n].Base := PR^.SyncBase;
+    Items[n].IsNew := PR^.SyncBase = '';
+    Snap := TSnapObj.Create;
+    Snap.Data := Items[n].Snap;
+    Snap.Base := PR^.SyncBase;
+    Snap.Id := PR^.AccountId;
+    St.InFlight.AddObject('P' + Key, Snap);
+    Inc(n);
+    Inc(m);
+  end;
   SetLength(Items, n);
   Jobs := nil;
   for k := 0 to St.Jobs.Count - 1 do
@@ -1916,11 +2505,11 @@ begin
     end;
   if St.NeedFull then
   begin
-    St.Thread.Submit(Items, Jobs, 0, St.IdEnd - St.IdNext < ID_LOW, not St.Joined);
+    St.Thread.Submit(Items, Jobs, 0, 0, St.IdEnd - St.IdNext < ID_LOW, not St.Joined);
     St.NeedFull := False;
   end
   else
-    St.Thread.Submit(Items, Jobs, St.PullSeq, St.IdEnd - St.IdNext < ID_LOW, not St.Joined);
+    St.Thread.Submit(Items, Jobs, St.PullSeq, St.PMPullSeq, St.IdEnd - St.IdNext < ID_LOW, not St.Joined);
   St.Busy := True;
 end;
 
@@ -1937,11 +2526,12 @@ begin
   MyPrepareTable(C, 'zs_db_seasons', SEASON_COLS, SEASON_KEYS);
   MyPrepareTable(C, 'zs_db_meta', META_COLS, META_KEYS);
   MyPrepareTable(C, 'zs_db_jobs', JOB_COLS, JOB_KEYS);
+  MyPrepareTable(C, 'zs_db_player_maps', PM_COLS, PM_KEYS);
   { the servers take turns by row locks inside transactions: a table made by hand with another
     engine (MyISAM has neither) would let them write over each other's changes }
   R := C.Query('SELECT table_name, engine FROM information_schema.tables WHERE table_schema = DATABASE() AND ' +
     'table_name IN (''zs_db_accounts'', ''zs_db_maps'', ''zs_db_server'', ''zs_db_seasons'', ''zs_db_meta'', ' +
-    '''zs_db_jobs'')');
+    '''zs_db_jobs'', ''zs_db_player_maps'')');
   try
     for i := 0 to R.RowCount - 1 do
       if not SameText(R.Str(i, 1), 'InnoDB') then
@@ -1972,6 +2562,49 @@ begin
   end;
 end;
 
+{ the rivals of a record under the numbers of the database (Numbers: this server's number -> the
+  database's, sorted); a rival no account of this server stands for goes }
+function JoinRivals(const A: TPMRivalArray; Numbers: TStringList): TPMRivalArray;
+var
+  Keys: array of Int64;
+  Order: TIntArray;
+  Tmp: TPMRivalArray;
+  i, j, n: LongInt;
+begin
+  Result := nil;
+  Tmp := nil;
+  SetLength(Tmp, Length(A));
+  n := 0;
+  for i := 0 to High(A) do
+  begin
+    j := Numbers.IndexOf(IntToStr(A[i].Id));
+    if j < 0 then
+      Continue;
+    Tmp[n] := A[i];
+    Tmp[n].Id := LongInt(PtrInt(Numbers.Objects[j]));
+    Inc(n);
+  end;
+  SetLength(Keys, n);
+  SetLength(Order, n);
+  for i := 0 to n - 1 do
+  begin
+    Keys[i] := Tmp[i].Id;
+    Order[i] := i;
+  end;
+  SortByKeys(Keys, Order);
+  SetLength(Result, n);
+  j := 0;
+  for i := 0 to n - 1 do
+    if (j > 0) and (Result[j - 1].Id = Tmp[Order[i]].Id) then
+      SumFields(@Result[j - 1], @Tmp[Order[i]], PMRivalFields)
+    else
+    begin
+      Result[j] := Tmp[Order[i]];
+      Inc(j);
+    end;
+  SetLength(Result, j);
+end;
+
 { The first time: this server's data goes into the shared database. An account of the same
   SteamID, or without Steam of the same computer, gets this server's numbers added - unless both
   have a password - and every other one comes in with a number of the database; the first server
@@ -1980,7 +2613,7 @@ end;
 function JoinDatabase(E: TZSEngine; C: TMyConnection; out Note: AnsiString; out Tried: Boolean): Boolean;
 var
   R: TMyResult;
-  BySteam, ByHwid, Taken: TStringList;
+  BySteam, ByHwid, Taken, Numbers: TStringList;
   k, i, Id, Added, Merged, NextId, MaxId: LongInt;
   Key: AnsiString;
   Empty: Boolean;
@@ -1988,8 +2621,11 @@ var
   Cur, Base, Remote: TPlayerProfile;
   MC, MB, MR: TMapProfile;
   SC, SB, SR: TServerRecords;
+  PR: PPlayerMapStats;
+  PMC, PMB, PMR: TPlayerMapStats;
+  PMEmpty: Boolean;
   Seq, TopId: Int64;
-  Stamp, Sid, SeqText, Data, Line: AnsiString;
+  Stamp, Sid, SeqText, Data, Line, Name: AnsiString;
   Version: Int64;
   Rows: TMyBatch;
 begin
@@ -2003,6 +2639,7 @@ begin
   BySteam := TStringList.Create;
   ByHwid := TStringList.Create;
   Taken := TStringList.Create;
+  Numbers := TStringList.Create;
   C.Exec('START TRANSACTION');
   try
     Seq := MetaValue(C, 'seq', True);
@@ -2016,6 +2653,7 @@ begin
       BySteam.Free;
       ByHwid.Free;
       Taken.Free;
+      Numbers.Free;
       Exit(True);
     end;
     Tried := True;
@@ -2025,6 +2663,8 @@ begin
     ByHwid.Duplicates := dupIgnore;
     Taken.Sorted := True;
     Taken.Duplicates := dupIgnore;
+    Numbers.Sorted := True;
+    Numbers.Duplicates := dupIgnore;
     { every row, the removed ones too: no number a row has is handed out again (the write would
       take that row over), and of two rows of one SteamID or computer the lower number is the
       account, as in SameAccount }
@@ -2131,6 +2771,7 @@ begin
         if Id > MaxId then
           MaxId := Id;
         Cur.ID := Id;
+        Numbers.AddObject(IntToStr(P^.ID), TObject(PtrInt(Id)));
         Data := EncodeProfile(Cur);
         Line := '(' + MyInt(Id) + ', ' + SteamValue(Cur.ActiveSteam) + ', ' + KeyValue(HwidKey(Cur));
         Rows.Add(Line + ', ' + MyStrMax(CodepageToUtf8(Cur.ActiveName, E.Cfg.SourceCodepage), 64) + ', ' +
@@ -2216,6 +2857,66 @@ begin
       C.Exec('INSERT IGNORE INTO zs_db_seasons (id, data, seq, updated_by, updated_at) VALUES (' + MyInt(E.DB.Seasons[k].Id) +
         ', ' + MyBin(EncodeSeason(E.DB.Seasons[k])) + ', ' + SeqText + ', ' + Sid + ', ' + Stamp + ')');
 
+    { the player-on-map records ([Matrix]) under the numbers of the database, their rivals too; a
+      record of an account that joined one the database had is added to what the database holds
+      for it. Behind a savepoint: whatever goes wrong there, the join goes in without them. }
+    C.Exec('SAVEPOINT zs_join_pm');
+    try
+      ClearPlayerMap(PMB);
+      for k := 0 to E.DB.PM.Places - 1 do
+      begin
+        PR := E.DB.PM.Items[k];
+        if PR = nil then
+          Continue;
+        i := Numbers.IndexOf(IntToStr(PR^.AccountId));
+        if i < 0 then
+          Continue;
+        Id := LongInt(PtrInt(Numbers.Objects[i]));
+        PMC := PR^;
+        PMC.Rivals := JoinRivals(PR^.Rivals, Numbers);
+        PMC.AccountId := Id;
+        Name := MyStrMax(CodepageToUtf8(PMC.MapName, E.Cfg.SourceCodepage), 64);
+        Version := 0;
+        if Taken.IndexOf(IntToStr(Id)) >= 0 then
+        begin
+          R := C.Query('SELECT version, data, deleted FROM zs_db_player_maps WHERE account_id = ' + MyInt(Id) +
+            ' AND map_name = ' + Name + ' FOR UPDATE');
+          try
+            if R.RowCount > 0 then
+            begin
+              Version := R.Int(0, 0);
+              if (R.Int(0, 2) = 0) and DecodePM(R.Str(0, 1), PMR) then
+                Merge3PlayerMap(PMC, PMB, PMR);
+            end;
+          finally
+            R.Free;
+          end;
+        end;
+        PMEmpty := PlayerMapEmpty(PMC);
+        if PMEmpty then
+          Data := 'NULL'
+        else
+          Data := MyBin(EncodePlayerMap(PMC));
+        C.Exec('INSERT INTO zs_db_player_maps (account_id, map_name, kills, deaths, playtime_sec, last_played, data, ' +
+          'version, seq, deleted, updated_by, updated_at) VALUES (' + MyInt(Id) + ', ' + Name + ', ' + MyInt(PMC.Kills) +
+          ', ' + MyInt(PMC.Deaths) + ', ' + MyInt(PMC.TimePlayed) + ', ' + MyDate(PMC.LastPlayed) + ', ' + Data + ', ' +
+          MyInt(Version + 1) + ', ' + SeqText + ', ' + MyInt(Ord(PMEmpty)) + ', ' + Sid + ', ' + Stamp +
+          ') ON DUPLICATE KEY UPDATE kills = VALUES(kills), deaths = VALUES(deaths), playtime_sec = VALUES(playtime_sec), ' +
+          'last_played = VALUES(last_played), data = VALUES(data), version = VALUES(version), seq = VALUES(seq), ' +
+          'deleted = VALUES(deleted), updated_by = VALUES(updated_by), updated_at = VALUES(updated_at)');
+      end;
+      C.Exec('RELEASE SAVEPOINT zs_join_pm');
+    except
+      on Ex: Exception do
+      begin
+        if (Ex is EMyError) and (EMyError(Ex).Code = 0) then
+          raise;
+        C.Exec('ROLLBACK TO SAVEPOINT zs_join_pm');
+        E.WriteServer('[ZitroStats] shared database: the player-on-map records of this server did not go in (' +
+          Ex.Message + ')');
+      end;
+    end;
+
     C.Exec('INSERT INTO zs_db_meta (name, value) VALUES (' + MyStr('joined_' + IntToStr(E.Cfg.MySQLServerID)) + ', ' +
       MyInt(DateTimeToUnix(Now)) + ') ON DUPLICATE KEY UPDATE value = VALUES(value)');
     C.Exec('UPDATE zs_db_meta SET value = ' + SeqText + ' WHERE name = ''seq''');
@@ -2235,6 +2936,7 @@ begin
   BySteam.Free;
   ByHwid.Free;
   Taken.Free;
+  Numbers.Free;
 end;
 
 { everything of the shared database, read in one consistent view }
@@ -2242,13 +2944,15 @@ function LoadDatabase(E: TZSEngine; C: TMyConnection; out St: TStoreState; out S
 var
   Cur: TMyCursor;
   P: PPlayerProfile;
-  n, m: LongInt;
+  n, m, w: LongInt;
   A: TSeasonArchive;
+  PR: PPlayerMapStats;
 begin
   Result := False;
   ClearStoreState(St);
   n := 0;
   m := 0;
+  w := 0;
   C.Exec('START TRANSACTION WITH CONSISTENT SNAPSHOT');
   try
     Seq := MetaValue(C, 'seq', False);
@@ -2316,8 +3020,36 @@ begin
     finally
       Cur.Free;
     end;
+    { the player-on-map records ([Matrix]), by the key of their row }
+    Cur := C.Open('SELECT account_id, map_name, version, data FROM zs_db_player_maps WHERE deleted = 0 AND ' +
+      'data IS NOT NULL');
+    try
+      while Cur.Next do
+      begin
+        PR := NewPlayerMap;
+        if not DecodePlayerMap(Cur.Str(3), PR^) then
+        begin
+          FreePlayerMap(PR);
+          Continue;
+        end;
+        PR^.AccountId := Cur.Int(0);
+        PR^.MapName := Utf8ToCodepage(Cur.Str(1), E.Cfg.SourceCodepage);
+        PR^.SyncBase := Cur.Str(3);
+        PR^.SyncVersion := Cur.Int(2);
+        if w >= Length(St.PlayerMaps) then
+          SetLength(St.PlayerMaps, w * 2 + 1024);
+        St.PlayerMaps[w] := PR;
+        Inc(w);
+      end;
+    finally
+      Cur.Free;
+    end;
+    St.PlayerMapCount := w;
+    SetLength(St.PlayerMaps, w);
     C.Exec('COMMIT');
     Note := Format('%d accounts, %d maps', [n, m]);
+    if w > 0 then
+      Note := Note + Format(', %d player-on-map records', [w]);
     Result := True;
   except
     on Ex: Exception do
@@ -2356,6 +3088,7 @@ begin
   ApplyPending(E, Pend);
   { nothing comes back: the whole database is read after this, so everything goes in at once }
   St.PullSeq := High(Int64);
+  St.PMPullSeq := High(Int64);
   SubmitBatch(E, St, True);
   T0 := MonoMs;
   Got := False;
@@ -2372,15 +3105,140 @@ begin
   begin
     { the answer comes with a later tick }
     St.PullSeq := 0;
+    St.PMPullSeq := 0;
     Why := 'the database did not answer in time';
     Exit;
   end;
   St.Busy := False;
   ApplyResult(E, St, R);
   St.PullSeq := 0;
+  St.PMPullSeq := 0;
   Result := R.Ok;
   if not Result then
     Why := R.Error;
+end;
+
+type
+  TPMKeyArray = array of TPMKey;
+
+{ At a start with the database, before what it holds replaces memory (S, read after PushPending):
+  a player-on-map record whose changes did not go in - one of an account that got its number in
+  that push waited for the number, one whose part of the push failed waits for the next - keeps
+  them on top of what the database holds for it now, and so does a removal that did not go in.
+  The records named in Marked and the removals in Gone go with the first exchange (MarkCarried). }
+procedure CarryPlayerMaps(E: TZSEngine; var S: TStoreState; out Marked: TPMKeyArray; out Gone: TPMGoneArray);
+var
+  Index: TStringList;
+  Waiting: TIntArray;
+  Removals: TPMGoneArray;
+  k, i, n, g: LongInt;
+  PR, SR: PPlayerMapStats;
+  Cur, Base, Empty: TPlayerMapStats;
+begin
+  Marked := nil;
+  Gone := nil;
+  Waiting := E.DB.PM.SyncPending;
+  Removals := E.DB.PM.GonePending;
+  if (Length(Waiting) = 0) and (Length(Removals) = 0) then
+    Exit;
+  SetLength(Marked, Length(Waiting) + Length(Removals));
+  n := 0;
+  g := 0;
+  ClearPlayerMap(Empty);
+  Index := TStringList.Create;
+  try
+    { map names in any case are one map }
+    Index.CaseSensitive := False;
+    Index.Sorted := True;
+    Index.Duplicates := dupIgnore;
+    for i := 0 to S.PlayerMapCount - 1 do
+      if S.PlayerMaps[i] <> nil then
+        Index.AddObject(PMKey(S.PlayerMaps[i]^.AccountId, S.PlayerMaps[i]^.MapName), TObject(PtrInt(i)));
+    { the removals first: a record removed and made again ends as the new one }
+    for k := 0 to High(Removals) do
+    begin
+      i := Index.IndexOf(PMKey(Removals[k].AccountId, Removals[k].MapName));
+      if (i < 0) or not DecodePM(Removals[k].Base, Base) then
+        Continue;
+      SR := S.PlayerMaps[PtrInt(Index.Objects[i])];
+      ClearPlayerMap(Cur);
+      Merge3PlayerMap(Cur, Base, SR^);
+      if PlayerMapEmpty(Cur) then
+      begin
+        { nothing is left of it: the removal goes in from what the database has now }
+        SetLength(Gone, g + 1);
+        Gone[g].AccountId := SR^.AccountId;
+        Gone[g].MapName := SR^.MapName;
+        Gone[g].Base := SR^.SyncBase;
+        Inc(g);
+        FreePlayerMap(S.PlayerMaps[PtrInt(Index.Objects[i])]);
+        Index.Delete(i);
+        Continue;
+      end;
+      Cur.AccountId := SR^.AccountId;
+      Cur.MapName := SR^.MapName;
+      Cur.SyncBase := SR^.SyncBase;
+      Cur.SyncVersion := SR^.SyncVersion;
+      SR^ := Cur;
+      Marked[n].AccountId := Cur.AccountId;
+      Marked[n].MapName := Cur.MapName;
+      Inc(n);
+    end;
+    for k := 0 to High(Waiting) do
+    begin
+      PR := E.DB.PM.Items[Waiting[k]];
+      if (PR = nil) or not DecodePM(PR^.SyncBase, Base) then
+        Continue;
+      Cur := PR^;
+      i := Index.IndexOf(PMKey(PR^.AccountId, PR^.MapName));
+      if i >= 0 then
+      begin
+        SR := S.PlayerMaps[PtrInt(Index.Objects[i])];
+        Merge3PlayerMap(Cur, Base, SR^);
+        Cur.AccountId := SR^.AccountId;
+        Cur.MapName := SR^.MapName;
+        Cur.SyncBase := SR^.SyncBase;
+        Cur.SyncVersion := SR^.SyncVersion;
+        SR^ := Cur;
+      end
+      else
+      begin
+        { the database has no such record: what this server added makes a new one }
+        Merge3PlayerMap(Cur, Base, Empty);
+        if PlayerMapEmpty(Cur) then
+          Continue;
+        Cur.SyncBase := '';
+        Cur.SyncVersion := 0;
+        SR := NewPlayerMap;
+        SR^ := Cur;
+        if S.PlayerMapCount >= Length(S.PlayerMaps) then
+          SetLength(S.PlayerMaps, S.PlayerMapCount * 2 + 16);
+        S.PlayerMaps[S.PlayerMapCount] := SR;
+        Index.AddObject(PMKey(SR^.AccountId, SR^.MapName), TObject(PtrInt(S.PlayerMapCount)));
+        Inc(S.PlayerMapCount);
+      end;
+      Marked[n].AccountId := Cur.AccountId;
+      Marked[n].MapName := Cur.MapName;
+      Inc(n);
+    end;
+  finally
+    Index.Free;
+  end;
+  SetLength(Marked, n);
+end;
+
+{ after the state was taken: what CarryPlayerMaps kept goes with the first exchange }
+procedure MarkCarried(E: TZSEngine; const Marked: TPMKeyArray; const Gone: TPMGoneArray);
+var
+  k, Place: LongInt;
+begin
+  for k := 0 to High(Marked) do
+  begin
+    Place := E.DB.PM.FindNo(Marked[k].AccountId, E.DB.PM.MapNumber(Marked[k].MapName, False));
+    if Place >= 0 then
+      E.DB.PM.SyncMark(Place);
+  end;
+  E.DB.PM.RequeueGone(Gone);
 end;
 
 function SqlStart(E: TZSEngine): Boolean;
@@ -2393,6 +3251,8 @@ var
   k: LongInt;
   Pend: TPending;
   HavePend, JoinTried, JoinOk: Boolean;
+  CarryKeys: TPMKeyArray;
+  CarryGone: TPMGoneArray;
 begin
   Result := False;
   JoinTried := False;
@@ -2436,9 +3296,12 @@ begin
       St.IdNext := TakeAccountIds(C, ID_BLOCK);
       C.Exec('COMMIT');
       St.IdEnd := St.IdNext + ID_BLOCK;
+      CarryPlayerMaps(E, S, CarryKeys, CarryGone);
       E.DB.TakeState(S);
+      MarkCarried(E, CarryKeys, CarryGone);
       St.Joined := True;
       St.PullSeq := Seq;
+      St.PMPullSeq := Seq;
       if St.PendingOnDisk or FileExists(PendingPath(E)) then
         WritePending(E, St);
       St.Online := True;
@@ -2477,6 +3340,7 @@ begin
           for k := 0 to E.DB.MapCount - 1 do
             E.DB.Maps[k].SyncBase := EncodeMap(E.DB.Maps[k]);
           E.DB.Server.SyncBase := EncodeServer(E.DB.Server);
+          E.DB.PM.SetBasesFromRecords;
           { but what waited beside the files still has to go in, from the state before it }
           if HavePend then
           begin

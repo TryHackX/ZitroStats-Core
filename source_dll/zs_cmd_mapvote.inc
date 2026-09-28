@@ -534,10 +534,11 @@ begin
     Out(E, Slot, '[Map vote] off ([MapVote] Enabled = 0): the server''s own map vote works as usual.', CLR_WARN)
   else
   begin
+    { CountSpectators = 0: a spectator who starts the vote or votes for it counts for that vote }
     if E.Cfg.MapVoteCountSpectators then
       Who := 'the players'
     else
-      Who := 'the players on the teams';
+      Who := 'the players on the teams and voting spectators';
     Out(E, Slot, Format('[Map vote] on: passes with %d%% of %s, fails after %d s', [E.Cfg.MapVotePercent, Who,
       E.Cfg.MapVoteSeconds]), CLR_HINT);
     Out(E, Slot, Format('[Map vote] none in the first %d s of a map or with less than %d s left, a starter waits %d s',

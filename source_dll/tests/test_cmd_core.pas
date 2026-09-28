@@ -2,7 +2,8 @@ program test_cmd_core;
 
 { The core commands (zs_commands, zs_cmd_profile, zs_cmd_server) through the engine: every line
   fits LINE_W, the columns start where they should, big counters are shortened, the rows follow
-  the game mode, !server takes its damage from one source, and the dispatcher answers. }
+  the game mode, !server takes its damage from one source, and the dispatcher answers - the weapon
+  commands under both spellings, wep and weap. }
 
 {$mode objfpc}{$H+}
 
@@ -262,6 +263,47 @@ begin
     Result := nil;
 end;
 
+{ everything a console command writes, alone }
+function Answer(const Text: AnsiString): AnsiString;
+begin
+  Console.Clear;
+  Run(Text);
+  WaitProcessed;
+  DrainActions;
+  Result := Console.Text;
+end;
+
+{ wep or weap: every weapon command takes both spellings, and answers the same }
+procedure WeapAliases;
+const
+  PAIRS: array[0..12, 0..1] of AnsiString = (
+    ('/mapweap ak rscs_test', '/mapwep ak rscs_test'),
+    ('/serverweap ak', '/serverwep ak'),
+    ('/srvweap ak', '/serverwep ak'),
+    ('/serverweaps', '/serverweapons'),
+    ('/srvweaps', '/serverweapons'),
+    ('/serverweapsby kills', '/serverweaponsby kills'),
+    ('/srvweapsby kills', '/serverweaponsby kills'),
+    ('/topweaps ak', '/topweapons ak'),
+    ('/topweapsby kills', '/topweaponsby kills'),
+    ('/mapwepstats rscs_test', '/mapweapstats rscs_test'),
+    ('/mapwepsstats rscs_test', '/mapweapstats rscs_test'),
+    ('/mapplayerwepstats rscs_test alice', '/mapplayerweapstats rscs_test alice'),
+    ('/mapplayerwepstatsi rscs_test 1', '/mapplayerweapstatsi rscs_test 1'));
+var
+  k: LongInt;
+  Mine, Theirs, Word: AnsiString;
+begin
+  for k := 0 to High(PAIRS) do
+  begin
+    Word := Copy(PAIRS[k, 0], 1, Pos(' ', PAIRS[k, 0] + ' ') - 1);
+    Theirs := Answer(PAIRS[k, 1]);
+    Mine := Answer(PAIRS[k, 0]);
+    Check(Format('%s is %s: a ZitroStats command with the same answer', [PAIRS[k, 0], PAIRS[k, 1]]),
+      IsZitroCommand(Word) and IsZitroCommand('!' + Copy(Word, 2, MaxInt)) and (Theirs <> '') and (Mine = Theirs));
+  end;
+end;
+
 var
   Root, Worst, L: AnsiString;
   A, B, D: PPlayerProfile;
@@ -317,6 +359,8 @@ begin
       A^.TimePlayed := 40000;
       A^.LastStand := 4;
       A^.ClutchesWon := 4;
+      A^.FirstBloodCount := 7;
+      A^.RoundFirstBloodCount := 12345;
       { the streaks: 5 and 10 kills from the counters of before the lengths were kept, 3 kills from
         the lengths, the best streak 12 }
       A^.SpreeKills := 40;
@@ -450,6 +494,9 @@ begin
       LineIn(Blk, 'Kits: Med') = 'Kits: Med 3, Nade 12.3k, Cluster 0, Vest 2, Berserk 1, Predator 0, Flamer 100k');
     Check('!otherstats: the season K/D as a ratio with the kills and deaths',
       Pos('Season K/D: 2.38 (112/47)', LineIn(Blk, 'Season K/D')) = COLS3[0] + 1);
+    Check('!otherstats: the first bloods of the rounds next to those of the matches, shortened',
+      (Pos('First Bloods: 7', LineIn(Blk, 'Max Streak: ')) = COLS3[0] + 1) and
+      (Pos('Round First Bloods: 12.3k', LineIn(Blk, 'Max Streak: ')) = COLS3[0] + COLS3[1] + 1));
   finally
     Blk.Free;
   end;
@@ -526,7 +573,27 @@ begin
     (Pos('!serverwep w*', LineWith('!serverweaponsby m*')) = 41) and
     (Pos('!topweapons [w] [pg]', LineWith('!serverweaponsby m*')) = 61));
   Check('!zitro: the legend says where the weapon metrics are listed',
-    Seen('m = metrics (!topby help, weapon metrics: !topwepsby help)  w = weapon (!wep help, !weap = !wep)'));
+    Seen('m = metrics (!topby help, weapon metrics: !topwepsby help)  w = weapon (!wep help)'));
+  Check('!zitro: the legend says that wep and weap are the same in every command',
+    Seen('wep or weap, either works in a command: !weap = !wep, !mapweap = !mapwep, !topweaps = !topweps'));
+  { the per-map commands ([Matrix]): three sections, two columns each (the longest three), in the
+    columns of the others; x[i] is the command and its "i" form }
+  L := LineWith('!playermaps[i] [flag] [pg] [p]');
+  Check('!zitro: a player over all maps, in the columns of the other sections',
+    (Pos('!rivals[i] [flag] [pg] [p]', L) = 41) and
+    (Pos('!playermatchup[i] [w] [flag] [pg] [p]', LineWith('!versus[i] [flag] [pg] p* [p2]')) = 41));
+  Check('!zitro: a player on one map, two commands to a row',
+    (Pos('!mapplayerotherstats[i] [map] [p]', LineWith('!mapplayerstats[i] [map] [p]')) = 41) and
+    (Pos('!mapplayerrivals[i] [map] [flag] [pg] [p]', LineWith('!mapplayerweapstats[i] [map] [p]')) = 41) and
+    (Pos('!playerheatmap[i] [map] [p]', LineWith('!mapplayermatchup[i] [map] [flag] [pg] [p]')) = 61));
+  Check('!zitro: one map, all its players',
+    (Pos('!mapmatchup [map] [w] [flag] [pg]', LineWith('!maprivals [map] [flag] [pg]')) = 41) and
+    (Pos('!mapwep w* [map]', LineWith('!mapweapstats [map] [flag] [pg]')) = 41));
+  Check('!zitro: the sections and the legend of the per-map commands', Seen('A player over all maps') and
+    Seen('A player on one map') and Seen('One map, all its players') and
+    Seen('per-map commands: [map] (else the current one), [w], [flag], [pg], [p] in this order  p2 = player 2') and
+    Seen('flag = the order (<cmd> help lists the flags, asc turns it round)  x[i] = also xi: n in place of p') and
+    Seen('matrix = matchup: !playermatrix[i], !mapplayermatrix[i], !mapmatrix  !mapweapon = !mapwep'));
   Check('!zitro: the password commands for a player without Steam only', Seen('1|3|/register pw* pw*') and
     not Seen('0|/register pw* pw*'));
   Check('!zitro: no team balance on a deathmatch server', not Seen('!switch = to the weaker team'));
@@ -552,13 +619,31 @@ begin
   { every answer of the commands above, to look at the layout of the tables }
   Console.SaveToFile(Root + PathDelim + 'console_dm.txt');
 
+  WeapAliases;
+
   { capture the flag: the flags and the team rows come back }
   Console.Clear;
   MapAfter('ctf_test', GS_CTF, 0);
   Run('/stats alice');
   Run('/server');
+  Run('/otherstats bob');
+  Run('/otherstats alice');
   Check('ctf commands processed', WaitProcessed);
   DrainActions;
+  Blk := Block('[ Detailed Telemetry: Bob ]');
+  try
+    Check('!otherstats on ctf without survival: no round first bloods of an account without them',
+      (Blk.Count > 2) and (CountIn(Blk, 'First Bloods: 0') = 1) and (CountIn(Blk, 'Round First Bloods') = 0));
+  finally
+    Blk.Free;
+  end;
+  Blk := Block('[ Detailed Telemetry: Alice ]');
+  try
+    Check('!otherstats on ctf: the round first bloods of an account that has them',
+      CountIn(Blk, 'Round First Bloods: 12.3k') = 1);
+  finally
+    Blk.Free;
+  end;
   Blk := Block('[ Stats: Alice ]');
   try
     Check('!stats on ctf: the flags row, the assists once', (CountIn(Blk, 'Flag Caps: ') = 1) and
@@ -571,6 +656,53 @@ begin
   if Worst <> '' then
     WriteLn('       too wide: ', Worst);
   Console.SaveToFile(Root + PathDelim + 'console_ctf.txt');
+
+  { a player by a name or a part of it: the players on the server first, the closest name among
+    them; the accounts only when nobody on the server matches, also an account with exactly the
+    name typed }
+  Console.Clear;
+  EnterCriticalSection(Engine.StateLock);
+  try
+    Engine.DB.CreateProfile('Al', '', 'HWAL1', '9.9.9.1', 1000);
+    Engine.DB.CreateProfile('Bo', '', 'HWBO1', '9.9.9.2', 1000);
+    Engine.DB.CreateProfile('lic', '', 'HWLIC1', '9.9.9.3', 1000);
+    Engine.DB.CreateProfile('Zed Offline', '', 'HWZED1', '9.9.9.4', 1000);
+    M := Engine.DB.CreateProfile('Dave Long Gone', '', 'HWDLG1', '9.9.9.5', 1000);
+    if Engine.DB.Valid(M) then
+      Engine.DB.Profiles[M]^.LastPlayedTime := Now - 3;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  Run('/rank al');
+  Run('/rank bo');
+  Run('/rank lic');
+  Run('/rank zed');
+  Run('/rank dave long');
+  Run('/stats offline');
+  Run('/rank nobody at all');
+  Check('player searches processed', WaitProcessed);
+  DrainActions;
+  Check('a player on the server whose name begins with the text before an account named exactly so',
+    Seen('[Rank] Alice #') and Seen('[Rank] Bob #') and not Seen('[Rank] Al #') and not Seen('[Rank] Bo #'));
+  Check('a player on the server with the text inside the name before an account named exactly so',
+    (SeenCount('[Rank] Alice #') = 2) and not Seen('[Rank] lic #'));
+  Check('the accounts only when nobody on the server matches: the closest name among them',
+    Seen('[Rank] Zed Offline #') and Seen('[ Stats: Zed Offline ]'));
+  Check('the words of a name: nobody on the server has "dave long", an account does',
+    Seen('[Rank] Dave Long Gone #'));
+  Check('nobody at all: not found', Seen('Player not found.'));
+
+  { !commands and !cmds belong to the owner's Basic script: ZitroStats does not take them }
+  Check('!commands and !cmds are no ZitroStats commands, !zitro and !help are',
+    not IsZitroCommand('!commands') and not IsZitroCommand('/cmds') and not IsZitroCommand('commands') and
+    IsZitroCommand('!zitro') and IsZitroCommand('!help') and IsZitroCommand('/zitro'));
+  Console.Clear;
+  Run('/commands');
+  Run('/cmds');
+  Run('/zitro');
+  Check('help commands processed', WaitProcessed);
+  DrainActions;
+  Check('the engine answers !zitro once, !commands and !cmds not at all', SeenCount(' - commands ') = 1);
 
   { the longest names, last seen long ago: "Recent Visitors" still fits the line }
   Console.Clear;

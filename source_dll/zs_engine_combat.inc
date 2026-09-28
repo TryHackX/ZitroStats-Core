@@ -145,6 +145,7 @@ begin
       if E.I[1] = RAY_BLOCKED then
       begin
         Inc(DB.Profiles[Idx]^.CoverShotKills);
+        MxCoverShot(Self, Idx);
         DB.Touch(Idx);
         What := 'blocked, counted as Cover (shot)';
       end;
@@ -181,10 +182,12 @@ begin
 end;
 
 { Survival team games: a death that leaves one player of the team alive against two or more
-  enemies. In a free-for-all the last one standing is the winner of the round (RoundEndFfa). }
+  enemies, with at least [Mechanics] LastStandMinPlayers humans on the teams in the round (the
+  dead count: they played it). In a free-for-all the last one standing is the winner of the round
+  (RoundEndFfa). }
 procedure TZSEngine.CheckLastStand(Victim: LongInt);
 var
-  S, T, Alive, Survivor, Enemies, Idx: LongInt;
+  S, T, Alive, Survivor, Enemies, Idx, Players: LongInt;
 begin
   if not Match.Survival or not TeamGame or not StatsOn or not SlotValid(Victim) then
     Exit;
@@ -194,18 +197,22 @@ begin
   Alive := 0;
   Survivor := 0;
   Enemies := 0;
+  Players := 0;
   for S := 1 to MAX_PLAYERS do
-    if Live[S].Active and Live[S].Human and Live[S].Alive then
+    if Live[S].Active and Live[S].Human and (Live[S].Team >= TEAM_ALPHA) and (Live[S].Team <= TEAM_DELTA) then
     begin
+      Inc(Players);
+      if not Live[S].Alive then
+        Continue;
       if Live[S].Team = T then
       begin
         Inc(Alive);
         Survivor := S;
       end
-      else if (Live[S].Team >= TEAM_ALPHA) and (Live[S].Team <= TEAM_DELTA) then
+      else
         Inc(Enemies);
     end;
-  if (Alive = 1) and (Enemies >= 2) then
+  if (Alive = 1) and (Enemies >= 2) and (Players >= Cfg.LastStandMinPlayers) then
   begin
     Match.LastStandGiven[T] := True;
     Match.ClutchSlot := Survivor;
@@ -215,6 +222,7 @@ begin
     begin
       Match.ClutchProfile := DB.Profiles[Idx]^.ID;
       Inc(DB.Profiles[Idx]^.LastStand);
+      MxLastStand(Self, Idx);
       DB.Touch(Idx);
       HudEvent(Survivor, Format('Last stand vs %d', [Enemies]));
     end;
@@ -276,6 +284,8 @@ begin
   ServerKill := (K = V) and ((E.I[2] and EF_SERVER_KILL <> 0) or
     (Match.Survival and (Live[V].TeamSinceTick = E.Tick)));
   ReloadOnDeath(V, E.Tick, not ServerKill);
+  { !lastfight: the kill and the record of the death, while the hits of the life are still known }
+  LastFightKill(Self, E, ServerKill);
   { the killer left in the same tick: the victim died, but it was nobody's selfkill }
   if not SlotValid(K) then
   begin
@@ -360,6 +370,9 @@ begin
         Cfg.SelfkillAssistShare + 50) div 100;
       Lost := -AddPoints(DB, Idx, -Pts, Cfg.MinimumPoints);
       AddPoints(DB, BestIdx, Lost, Cfg.MinimumPoints);
+      MxPoints(Self, Idx, -Lost);
+      MxPoints(Self, BestIdx, Lost);
+      MxSelfkillPoints(Self, BestIdx, Idx, Lost);
       Inc(DB.Profiles[BestIdx]^.ForcedSelfkills);
       DB.Touch(BestIdx);
       if Lost > 0 then
@@ -373,7 +386,9 @@ begin
       Lost := -AddPoints(DB, Idx, -Cfg.SelfkillPenalty, Cfg.MinimumPoints);
       if Lost > 0 then
         HudEvent(Slot, Format('-%d pts selfkill', [Lost]));
+      MxPoints(Self, Idx, -Lost);
     end;
+    MxSelfkill(Self, Idx, Best > 0);
     DB.Touch(Idx);
   end;
   LiveLifeEnded(Live, Slot, GameTick);
@@ -402,11 +417,13 @@ begin
         HudEvent(K, Format('-%d pts teamkill', [Lost]))
       else
         HudEvent(K, 'Teamkill - no points');
+      MxTeamkill(Self, KIdx, Lost, Flags);
       DB.Touch(KIdx);
     end;
     if DB.Valid(VIdx) then
     begin
       Inc(DB.Profiles[VIdx]^.DeathsByFriendly);
+      MxTeamkillDeath(Self, VIdx);
       DB.Touch(VIdx);
     end;
   end;
@@ -420,6 +437,10 @@ var
   KX, KY, VX, VY, HX, HY, SX, SY, R, OwnX, OwnY, FoeX, FoeY: Single;
   DistM, AssistDamage: Double;
   DistOk, Inactive, Headshot, Saved, SavedFlagger: Boolean;
+  { [Matrix]: the killer's first bloods before this kill }
+  MxFB, MxRFB: LongInt;
+  { [Matrix]: the counters of the killer and of the victim before this kill }
+  MxK, MxV: TMxSnap;
 begin
   K := E.Slot;
   V := E.Slot2;
@@ -441,6 +462,8 @@ begin
   end;
   KP := DB.Profiles[KIdx];
   VP := DB.Profiles[VIdx];
+  MxFirstBloods(KP^, MxFB, MxRFB);
+  MxSnapTwo(Self, KIdx, VIdx, MxK, MxV);
   WS := WepSlot(W);
   M := Match.MapIndex;
   { no clear line to the victim when the kill landed: the shot went through cover (Map.RayCast).
@@ -586,11 +609,17 @@ begin
       Inc(DB.Server.WeaponGlobal[WS].DistBucket[Bucket]);
       DB.Server.WeaponGlobal[WS].KillDistSum := DB.Server.WeaponGlobal[WS].KillDistSum + DistM;
       Inc(DB.Server.WeaponGlobal[WS].KillDistCount);
+      { the same for the killer's own weapon }
+      Inc(KP^.Weapons[WS].DistBucket[Bucket]);
+      KP^.Weapons[WS].KillDistSum := KP^.Weapons[WS].KillDistSum + DistM;
+      Inc(KP^.Weapons[WS].KillDistCount);
     end;
     if WepSlot(VW) >= 0 then
       Inc(DB.Server.Matchups[WS, WepSlot(VW)]);
     if E.F[6] > 0 then
       Inc(DB.Server.WeaponGlobal[WS].VestKills);
+    if E.F[6] > 0 then
+      Inc(KP^.Weapons[WS].VestKills);
   end;
   D := DailyEntry;
   if D >= 0 then
@@ -603,6 +632,7 @@ begin
       Inc(DB.Maps[M].WeaponKills[WS]);
     HeatAdd(M, KX, KY, True);
     HeatAdd(M, VX, VY, False);
+    MxMapKill(Self, M, K, WS, VW);
     DB.TouchMap(M);
   end;
 
@@ -693,11 +723,21 @@ begin
     end;
   end;
 
+  { the first kill of the match, once per match; in survival also the first kill of each round,
+    counted apart. The first kill of the first round is both, and the HUD says the one of the
+    match. }
   if not Match.FirstBlood then
   begin
     Match.FirstBlood := True;
     Inc(KP^.FirstBloodCount);
     HudEvent(K, 'FIRST BLOOD!');
+  end
+  else if Match.Survival and not Match.RoundFirstBlood then
+    HudEvent(K, 'ROUND FIRST BLOOD');
+  if Match.Survival and not Match.RoundFirstBlood then
+  begin
+    Match.RoundFirstBlood := True;
+    Inc(KP^.RoundFirstBloodCount);
   end;
 
   UpdateNemesis(KP^.TopVictims, VP^.ID);
@@ -786,6 +826,8 @@ begin
       begin
         Inc(DB.Server.WeaponGlobal[WS].TTKSumTicks, TTK);
         Inc(DB.Server.WeaponGlobal[WS].TTKCount);
+        Inc(KP^.Weapons[WS].TTKSumTicks, TTK);
+        Inc(KP^.Weapons[WS].TTKCount);
       end;
     end;
   end;
@@ -807,6 +849,7 @@ begin
         Inc(AP^.Assist);
         if Flags and EF_B_FLAGGER <> 0 then
           Inc(AP^.FlaggerKillsAssist);
+        MxAssist(Self, AIdx, Flags and EF_B_FLAGGER <> 0);
         DB.Touch(AIdx);
         HudEvent(A, 'Assist');
       end;
@@ -860,6 +903,9 @@ begin
   if SuspiciousKill(Live[K].Pair[V], Tk, Live[V].MatchKills, HumansPlaying, Cfg) then
     LogSuspicious(K, V);
 
+  MxKill(Self, E, KIdx, VIdx, WS, DistOk, DistM, Gain, Loss, MxFB, MxRFB);
+  MxFollow(Self, MxK);
+  MxFollow(Self, MxV);
   NoteProtectionActivity(DB, KIdx, Cfg);
   NoteProtectionActivity(DB, VIdx, Cfg);
   DB.Touch(KIdx);
@@ -985,6 +1031,8 @@ end;
 
 procedure TZSEngine.EvDamage(var E: TZSEvent);
 var
+  { [Matrix]: the counters of the shooter and of the victim before this hit }
+  MxS, MxV: TMxSnap;
   S, V, W, WS, Flags, Zone, Posture, SIdx, VIdx: LongInt;
   Dmg, Speed, Cap: Single;
   DX, DY: Double;
@@ -1041,6 +1089,8 @@ begin
     Cap := E.F[8];
   if Dmg > Cap then
     Dmg := Cap;
+  { !lastfight: the hit for the one who took it and the one who dealt it }
+  LastFightHit(Self, E, Dmg, Zone);
 
   if not IsSelf and not Friendly then
   begin
@@ -1077,6 +1127,7 @@ begin
     VP := DB.Profiles[VIdx]
   else
     VP := nil;
+  MxSnapTwo(Self, SIdx, VIdx, MxS, MxV);
 
   if IsSelf then
   begin
@@ -1150,8 +1201,11 @@ begin
       VP^.DamageReceived := VP^.DamageReceived + Dmg;
       DB.Touch(VIdx);
     end;
+    MxDamage(Self, SIdx, VIdx, W, Dmg, Zone);
   end;
   CountHurt(S, V, W, IsSelf, Friendly, SIdx, VIdx);
+  MxFollow(Self, MxS);
+  MxFollow(Self, MxV);
   DB.Touch(SIdx);
 end;
 
@@ -1161,6 +1215,8 @@ var
   P: PPlayerProfile;
   CapSec: Double;
   Enemies, Mates, EnemySlots, MateSlots, Gains, Losses: TIntArray;
+  { [Matrix]: the counters of the player before this flag event }
+  MxP: TMxSnap;
 begin
   { main.pas reports where the flags stand in their bases, without a player }
   if E.I[0] = FLAG_BASE then
@@ -1199,6 +1255,7 @@ begin
     P := DB.Profiles[Idx]
   else
     P := nil;
+  MxSnap(Self, Idx, MxP);
 
   case Kind of
     FLAG_SCORE:
@@ -1222,6 +1279,7 @@ begin
                 P^.FastestCapSeconds := CapSec;
               if CapSec < 10 then
                 Inc(P^.CapsUnder10s);
+              MxCapTime(Self, Idx, CapSec);
               if M >= 0 then
               begin
                 DB.Maps[M].CapTimeSum := DB.Maps[M].CapTimeSum + CapSec;
@@ -1280,16 +1338,20 @@ begin
             for k := 0 to High(Enemies) do
               if Losses[k] > 0 then
                 HudEvent(EnemySlots[k], Format('-%d pts enemy capture', [Losses[k]]));
+            MxPoints(Self, Idx, Gain);
+            MxCapturePool(Self, Mates, Gains, Enemies, Losses);
           end
           else
           begin
             Gain := AddPoints(DB, Idx, Cfg.FlagScoreFallbackPoints, Cfg.MinimumPoints);
             if Gain > 0 then
               HudEvent(S, Format('+%d pts capture', [Gain]));
+            MxPoints(Self, Idx, Gain);
           end;
           AfterProfileChange(Idx);
         end;
         Live[S].FlagGrabTick := 0;
+        Match.CaptureTick := GameTick;
         if M >= 0 then
           Inc(DB.Maps[M].FlagsScore);
         { EvTick counts the survival rounds of Infiltration from the team still standing, but a
@@ -1344,6 +1406,9 @@ begin
         end;
       end;
   end;
+  if P <> nil then
+    MxFlag(Self, Idx, Kind);
+  MxFollow(Self, MxP);
   if P <> nil then
     DB.Touch(Idx);
   if M >= 0 then

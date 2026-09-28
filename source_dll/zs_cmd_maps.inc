@@ -1,7 +1,7 @@
 { zs_commands: map statistics and map rankings }
 
 const
-  MAP_METRICS: array[0..30] of TMetricDef = (
+  MAP_METRICS: array[0..32] of TMetricDef = (
     (Aliases: ' time playtime duration '; Header: 'Playtime'; Fmt: mfTime; Asc: False),             { 0 }
     (Aliases: ' matches plays games '; Header: 'Matches'; Fmt: mfInt; Asc: False),
     (Aliases: ' kills kill k '; Header: 'Kills'; Fmt: mfInt; Asc: False),
@@ -32,7 +32,10 @@ const
     (Aliases: ' votedaway votewins '; Header: 'VotedAway'; Fmt: mfInt; Asc: False),
     (Aliases: ' stayed retention '; Header: 'Stayed%'; Fmt: mfPct; Asc: False),
     (Aliases: ' leftafter emptying '; Header: 'LeftAfter%'; Fmt: mfPct; Asc: False),
-    (Aliases: ' endplayers lastplayers '; Header: 'EndPlayers'; Fmt: mfDec1; Asc: False)          { 30 }
+    (Aliases: ' endplayers lastplayers '; Header: 'EndPlayers'; Fmt: mfDec1; Asc: False),         { 30 }
+    { the last second played with the statistics on, and the last time the map ran at all }
+    (Aliases: ' lastplayed played '; Header: 'LastPlayed'; Fmt: mfDate; Asc: False),
+    (Aliases: ' lastloaded loaded '; Header: 'LastLoaded'; Fmt: mfDate; Asc: False)                { 32 }
   );
 
 { every ended match adds its length; data from before 5.1 has no count of them yet }
@@ -90,6 +93,8 @@ begin
       else
         Result := 0;
     30: Result := SafeDivD(M.CurveSum[9], M.CurveSecs[9]);
+    31: Result := M.LastPlayedTime;
+    32: Result := M.LastLoadedTime;
     else Result := 0;
   end;
 end;
@@ -265,6 +270,8 @@ begin
   Out(E, Slot, '[Combat & Objectives]', CLR_HEADER);
   Out(E, Slot, '  kills, selfkills, caps, returns, grabs, drops, thrown, rwins, fastcap, avgcap,', WHITE);
   Out(E, Slot, '  comebacks, close', WHITE);
+  Out(E, Slot, '[Dates, newest first]', CLR_HEADER);
+  Out(E, Slot, '  lastplayed (the last game with the statistics on), lastloaded (the map ran at all)', WHITE);
   Footer(E, Slot, W);
 end;
 
@@ -375,7 +382,11 @@ begin
     Line := PadR(IntToStr(k + 1), 5) + PadR(Copy(M^.MapName, 1, NameW - 1), NameW);
     if Length(Ids) = 1 then
     begin
-      Line := Line + PadR(MetricText(MAP_METRICS[Ids[0]].Fmt, MapMetricValue(M^, Ids[0])), 16);
+      { a date alone has room for its hour as well }
+      if MAP_METRICS[Ids[0]].Fmt = mfDate then
+        Line := Line + PadR(DateText(MapMetricValue(M^, Ids[0]), 'dd.mm.yy hh:nn'), 16)
+      else
+        Line := Line + PadR(MetricText(MAP_METRICS[Ids[0]].Fmt, MapMetricValue(M^, Ids[0])), 16);
       if ShowKills then
         Line := Line + PadR(Num(M^.Kills), 10);
       if ShowMatches then
@@ -645,7 +656,7 @@ var
   M: PMapProfile;
   Tmp: TMapProfile;
   Slots, Kills, Points, Extra: array[0..MAX_PLAYERS - 1] of LongInt;
-  Games: Int64;
+  Games, Wipes: Int64;
 begin
   if Arg = '' then
     MI := E.Match.MapIndex
@@ -679,7 +690,8 @@ begin
   Caps := E.Match.GameStyle in [GS_CTF, GS_INF];
 
   Cells := nil;
-  PushCell(Cells, 'Time: ' + FormatDurationShort(M^.ActiveTimePlays));
+  { the time played with the statistics on }
+  PushCell(Cells, 'Played Time: ' + FormatDurationShort(M^.ActiveTimePlays));
   PushCell(Cells, 'Matches: ' + Num(M^.ActiveMapPlays));
   PushCell(Cells, 'Kills: ' + Num(M^.Kills));
   PushCell(Cells, 'Selfkills: ' + Num(M^.Selfkills));
@@ -695,7 +707,9 @@ begin
   PushCell(Cells, 'Joins: ' + Num(M^.JoinGameCount));
   PushCell(Cells, 'Spec Joins: ' + Num(M^.JoinToSpectator));
   PushCell(Cells, 'Kicks: ' + Num(M^.KickedCount));
-  PushCell(Cells, 'Last: ' + DateText(M^.LastPlayedTime, 'dd.mm.yy'));
+  { played: the last second with the statistics on; loaded: the last time the map ran at all }
+  PushCell(Cells, 'Last Played: ' + DateText(M^.LastPlayedTime, 'dd.mm.yy'));
+  PushCell(Cells, 'Last Loaded: ' + DateText(M^.LastLoadedTime, 'dd.mm.yy'));
   PushCell(Cells, 'Loads: ' + Num(M^.LoadCount));
   PushCell(Cells, 'Aborted: ' + Num(M^.MatchesAborted));
   if Teams then
@@ -760,6 +774,61 @@ begin
         Pct(M^.AlphaRoundWins, Games), BiasBar(M^.AlphaRoundWins, M^.BravoRoundWins), Pct(M^.BravoRoundWins, Games),
         Num(M^.BravoRoundWins)]), WHITE);
     end;
+    { the kills made by the players of each team on the map }
+    Games := Int64(M^.KillsByTeam[1]) + M^.KillsByTeam[2];
+    if M^.KillsByTeam[3] + M^.KillsByTeam[4] > 0 then
+    begin
+      Section(E, Slot, 'Kill Balance (Alpha / Bravo / Charlie / Delta)', W);
+      Row(E, Slot, ['Alpha: ' + Num(M^.KillsByTeam[1]) + ' kills', 'Bravo: ' + Num(M^.KillsByTeam[2]) + ' kills',
+        'Charlie: ' + Num(M^.KillsByTeam[3]) + ' kills', 'Delta: ' + Num(M^.KillsByTeam[4]) + ' kills'], COLS4, WHITE);
+    end
+    else if Games > 0 then
+    begin
+      Section(E, Slot, 'Kill Balance: Alpha [#] vs Bravo [=]', W);
+      Out(E, Slot, Format('Alpha %5s kills (%6s)  [%s]  (%6s) %5s kills Bravo', [Num(M^.KillsByTeam[1]),
+        Pct(M^.KillsByTeam[1], Games), BiasBar(M^.KillsByTeam[1], M^.KillsByTeam[2]), Pct(M^.KillsByTeam[2], Games),
+        Num(M^.KillsByTeam[2])]), WHITE);
+    end;
+  end;
+
+  { how the survival rounds of the map ended: in the team modes won by the team that wiped out the
+    others or by a capture (CTF, INF), in free-for-all by the last one standing, in both without a
+    survivor or cut short by the map change. The ways the current mode ends its rounds show also at
+    0, the others only when rounds ended so; free-for-all names no team. }
+  Wipes := Int64(M^.RoundsElimination[1]) + M^.RoundsElimination[2] + M^.RoundsElimination[3] +
+    M^.RoundsElimination[4];
+  if E.Match.Survival or (Wipes + M^.RoundsCapture + M^.RoundsLastStanding + M^.RoundsNoSurvivor +
+     M^.RoundsMapChange > 0) then
+  begin
+    Section(E, Slot, 'How the Survival Rounds Ended', W);
+    Cells := nil;
+    if Teams then
+    begin
+      if E.Match.Survival or (M^.RoundsElimination[1] > 0) then
+        PushCell(Cells, 'Alpha by elimination: ' + Num(M^.RoundsElimination[1]));
+      if E.Match.Survival or (M^.RoundsElimination[2] > 0) then
+        PushCell(Cells, 'Bravo by elimination: ' + Num(M^.RoundsElimination[2]));
+      if M^.RoundsElimination[3] > 0 then
+        PushCell(Cells, 'Charlie by elimination: ' + Num(M^.RoundsElimination[3]));
+      if M^.RoundsElimination[4] > 0 then
+        PushCell(Cells, 'Delta by elimination: ' + Num(M^.RoundsElimination[4]));
+      if (E.Match.Survival and Caps) or (M^.RoundsCapture > 0) then
+        PushCell(Cells, 'By capture: ' + Num(M^.RoundsCapture));
+      if M^.RoundsLastStanding > 0 then
+        PushCell(Cells, 'Last one standing: ' + Num(M^.RoundsLastStanding));
+    end
+    else
+    begin
+      if E.Match.Survival or (M^.RoundsLastStanding > 0) then
+        PushCell(Cells, 'Last one standing: ' + Num(M^.RoundsLastStanding));
+      if Wipes + M^.RoundsCapture > 0 then
+        PushCell(Cells, 'Team rounds: ' + Num(Wipes + M^.RoundsCapture));
+    end;
+    if E.Match.Survival or (M^.RoundsNoSurvivor > 0) then
+      PushCell(Cells, 'No survivor: ' + Num(M^.RoundsNoSurvivor));
+    if E.Match.Survival or (M^.RoundsMapChange > 0) then
+      PushCell(Cells, 'Cut by map change: ' + Num(M^.RoundsMapChange));
+    FlowCells(E, Slot, Cells, 3, WHITE);
   end;
 
   CurveSecs := 0;

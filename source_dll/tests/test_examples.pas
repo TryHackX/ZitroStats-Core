@@ -83,6 +83,8 @@ begin
     (A.IntegrityRespawnAfterMapChange = B.IntegrityRespawnAfterMapChange) and
     (A.IntegrityProtectMapChange = B.IntegrityProtectMapChange) and (A.SpreesEnabled = B.SpreesEnabled) and
     (A.SpreeShutText = B.SpreeShutText) and (A.HudEnabled = B.HudEnabled) and (A.ColHeader = B.ColHeader) and
+    (A.HudEventSeconds = B.HudEventSeconds) and (A.LastStandMinPlayers = B.LastStandMinPlayers) and
+    (A.MapVoteCountSpectators = B.MapVoteCountSpectators) and (A.MapVoteMinPlayers = B.MapVoteMinPlayers) and
     (A.DataPath = B.DataPath) and (A.MySQLHost = B.MySQLHost) and (A.MySQLUser = B.MySQLUser) and
     (A.MySQLDatabase = B.MySQLDatabase) and (A.MySQLServerID = B.MySQLServerID) and
     (A.AdminConfirmPassword = '') and not A.MailEnabled and not A.WebhookEnabled;
@@ -96,6 +98,13 @@ begin
   Dir := Root + 'Example-configs' + PathDelim;
 
   Check('settings.ini loads without warnings', LoadClean(Root + 'settings.ini', Base));
+  { these settings are in the file, with the values the library uses without them }
+  Check('settings.ini: [HUD] EventSeconds 2, [Mechanics] LastStandMinPlayers 3, [MapVote] CountSpectators 1',
+    (Base.HudEventSeconds = 2) and (Base.LastStandMinPlayers = 3) and Base.MapVoteCountSpectators);
+  C := Default(TZSConfig);
+  SetConfigDefaults(C);
+  Check('... the same as the built-in values', (C.HudEventSeconds = Base.HudEventSeconds) and
+    (C.LastStandMinPlayers = Base.LastStandMinPlayers) and (C.MapVoteCountSpectators = Base.MapVoteCountSpectators));
 
   { every file of the folder, also one this program does not know }
   n := 0;

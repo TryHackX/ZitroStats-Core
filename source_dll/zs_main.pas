@@ -35,7 +35,7 @@ library zitrostats_dll;
                         killer x/y, victim x/y, bullet x/y (valid with EF_BULLET), victim vest
     ZS_Ev_Damage        shooter, victim, bullet id, weapon, EF_* flags, damage, victim vest
                         before the hit, bullet x/y, bullet velocity x/y, victim x/y, victim health
-                        before the hit
+                        before the hit, victim velocity x/y, shooter velocity x/y (pixels a tick)
     ZS_Ev_Shot          slot, weapon, shots fired this tick, shooter position (scripts before
                         API 12; main.pas sends ZS_Ev_Ammo)
     ZS_Ev_Ammo          slot, weapon, ammunition before and now, 1 = the reload key was down when
@@ -458,7 +458,8 @@ begin
 end;
 
 procedure ZS_Ev_Damage(Shooter, Victim, BulletId, Weapon, Flags, Tick: LongInt;
-  Damage, VictimVest, BX, BY, BVX, BVY, VX, VY, VictimHealth: Single); cdecl;
+  Damage, VictimVest, BX, BY, BVX, BVY, VX, VY, VictimHealth, VictimVelX, VictimVelY, ShooterVelX,
+  ShooterVelY: Single); cdecl;
 var
   Ev: TZSEvent;
 begin
@@ -479,6 +480,10 @@ begin
     Ev.F[6] := VX;
     Ev.F[7] := VY;
     Ev.F[8] := VictimHealth;
+    Ev.F[9] := VictimVelX;
+    Ev.F[10] := VictimVelY;
+    Ev.F[11] := ShooterVelX;
+    Ev.F[12] := ShooterVelY;
     Queue(Ev);
   except
   end;

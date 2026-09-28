@@ -581,6 +581,15 @@ begin
     LeaveCriticalSection(Engine.StateLock);
   end;
   Check('/votemap belongs to the map vote while it is on', Engine.MapVoteSlash = 1);
+  EnterCriticalSection(Engine.StateLock);
+  try
+    Ok := Engine.Cfg.MapVoteCountSpectators;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  Check('CountSpectators is on by default', Ok);
+  { the votes below run with CountSpectators = 0 up to the part that switches it on }
+  SetCfg(0, 0);
 
   { five players on the teams (Alice is an admin), a spectator and a bot; the script starts in the
     middle of ctf_Ash and sends the maps list }
@@ -703,8 +712,13 @@ begin
   Acts.Clear;
   Chat(6, '!v');
   Step;
-  Check('a spectator does not vote (CountSpectators = 0)', Said(6, 'Spectators do not vote on this server: join a team first.')
-    and (Broadcasts = 0));
+  Check('CountSpectators = 0: a spectator who votes joins the voters of this vote, a voter and a yes',
+    Told('Spec voted for ctf_Run (3/6, 60% needed).') and (Broadcasts = 1) and (LinesTo(6) = 0) and VoteActive);
+  Acts.Clear;
+  Chat(6, '!v');
+  Step;
+  Check('... and counts as one of them when voting again',
+    Said(6, 'You voted for ctf_Run already (3/6, 60% needed, 19 s left).') and (Broadcasts = 0));
   Acts.Clear;
   Chat(4, '!map arena2');
   Step;
@@ -715,8 +729,8 @@ begin
   CurTick := T0 + 300;
   SoldatVote(3, 3, 'ctf_Run');
   Step;
-  Check('F12 (OnVoteMap) is a vote', Told('Carl voted for ctf_Run (3/5, 60% needed).'));
-  Check('60% of 5 is 3: the vote passes', Told('ctf_Run won the vote (3/5).') and not VoteActive);
+  Check('F12 (OnVoteMap) is a vote', Told('Carl voted for ctf_Run (4/6, 60% needed).'));
+  Check('4 of 6 is 60% or more: the vote passes', Told('ctf_Run won the vote (4/6).') and not VoteActive);
   k := IndexOfAct(Acts, ACT_MAP_CHANGE, 'ctf_Run');
   i := IndexOfAct(Acts, ACT_VOTE_END, '');
   Check('the map changes (Map.NextMap: it is the next map of the list), then the vote percent goes back',
@@ -822,7 +836,22 @@ begin
   Chat(1, '!map arena2');
   Step;
   Check('MinPlayers: the players on the teams', Said(1, 'A map vote needs 10 players on the teams (5 now).'));
+  Acts.Clear;
+  Chat(6, '!map arena2');
+  Step;
+  Check('MinPlayers: a spectator who asks for a vote is one of its voters (CountSpectators = 0)',
+    Said(6, 'A map vote needs 10 players (6 now: the players on the teams and you).'));
   SetCfg(1, 1);
+  Acts.Clear;
+  Chat(6, '!map arena2');
+  Step;
+  Check('CountSpectators = 0: a spectator starts a vote as its voter and a yes, the other spectators do not count',
+    (Count(Acts, ACT_VOTE_START, -1, 'Arena2') = 1) and
+    Told('Spec wants Arena2: !v or F12 to vote, 20 s, 60% needed (1/6).'));
+  Acts.Clear;
+  Cmd(0, '/zs_mapvote cancel', SRC_CONSOLE);
+  Step;
+  Check('the vote of the spectator is cancelled', Told('An admin cancelled the vote for Arena2.') and not VoteActive);
 
   { ---- AllowAnyMap: a map of the folder; the admin's view and cancel ---- }
   SetCfg(2, 0);
@@ -840,7 +869,7 @@ begin
   Cmd(0, '/zs_mapvote', SRC_CONSOLE);
   Step;
   Check('/zs_mapvote: the settings and the vote that runs',
-    Written('[Map vote] on: passes with 60% of the players on the teams, fails after 20 s') and
+    Written('[Map vote] on: passes with 60% of the players on the teams and voting spectators, fails after 20 s') and
     Written('[Map vote] running: Arena2, 20 s left, 1/5') and
     Written('[Map vote] asked by Alice just now - /zs_mapvote cancel ends it.') and
     Written('[Map vote] maps list: 5 maps, next ctf_Missing') and Written('[Map vote] maps folder: 7 maps (/zs_maps)'));

@@ -1,6 +1,6 @@
-# ZitroStats 5.2 - Statistics reference
+# ZitroStats 5.5 - Statistics reference
 
-This document lists every statistic ZitroStats 5.2 collects, how the code counts it and where it is shown. It is written from the source code (`source_dll/`, `main.pas`). Setting names are given as `[Section] Key`; the values in brackets are the ones in the shipped `settings.ini`.
+This document lists every statistic ZitroStats 5.5 collects, how the code counts it and where it is shown. It is written from the source code (`source_dll/`, `main.pas`). Setting names are given as `[Section] Key`; the values in brackets are the ones in the shipped `settings.ini`.
 
 ## Contents
 
@@ -100,28 +100,29 @@ A few things are counted even while statistics are off: spectator time, the play
 
 ## Where to look
 
-`[p]` = nothing for yourself, a name or part of it, or `#id`. `<pos>` = position in the points ranking. `<pg>` = page. Player commands work with `!` in the chat and with `/`, except `info` and `pm`: ZitroStats answers them only in the chat (`!info`, `!pm`), because `/info` and `/pm` are Soldat's own commands.
+`[p]` = nothing for yourself, a name or part of it, or `#id`: the players on the server are searched first (the closest name among them), the accounts only when nobody on the server matches. `<pos>` = position in the points ranking. `<pg>` = page. Player commands work with `!` in the chat and with `/`, except `info` and `pm`: ZitroStats answers them only in the chat (`!info`, `!pm`), because `/info` and `/pm` are Soldat's own commands.
 
 | Command or output | What it shows | Game modes / mode-dependent parts |
 | :--- | :--- | :--- |
-| `!zitro`, `!help`, `!commands`, `!cmds`, `!info`, `!reginfo`, `!credits`, `!autor`, `!tworca` | Every command with its arguments. | `!pm` is listed only in PM, `!rambo` and `!ramboi` only in RM, the team balance commands only in team modes. Password commands only for players without Steam (`/removemypass` only with `AllowPasswordRemoval = 1`), admin commands only for admins. |
+| `!zitro`, `!help`, `!info`, `!reginfo`, `!credits`, `!autor`, `!tworca` | Every command with its arguments (`!commands` and `!cmds` are left to other scripts). | `!pm` is listed only in PM, `!rambo` and `!ramboi` only in RM, the team balance commands only in team modes, `!lastfight` only with `[LastFight] Enabled = 1`, the map vote commands that are switched on, the per-map commands only with `[Matrix] Enabled = 1` (`!playerheatmap` with `PlayerHeatmap = 1`). Password commands only for players without Steam (`/removemypass` only with `AllowPasswordRemoval = 1`), admin commands only for admins. |
 | `!stats [p]`, `!statsi <pos>` | Main profile. | Team row only in team modes; flag row in objective modes or with flag data; Rambo row in RM or with bow data; Survival and Friendly fire change some cells. |
 | `!otherstats [p]`, `!otherstatsi <pos>` | Detailed profile in 13 sections. | CTF section in objective modes or with flag data; HTF row in HTF or with HTF data; cells change with Survival, Realistic and Friendly fire; ratings of the current family. |
 | `!status [p]`, `!statusi <pos>` | Play time, dates, account type and, for any player on the server, the live session. | none |
 | `!rank [p]`, `!ranki <pos>`, `!ranknum <pos>` | One line with rank, points, rating, K/D. | Rating depends on the current mode. |
 | `!session`, `!today` | Your counters since you joined the server; a map change does not reset them. | none |
+| `!lastfight [1-3]` | Your last 3 deaths since you joined: the killer, a timeline of the hits both ways, who hurt you, what you dealt, points, a dodge estimate; lines after each death. | Runtime only, `[LastFight]`; the role `teammate` only in team modes. |
 | `!spree [p]`, `!spreei <pos>`, `!pointmatch [p]`, `!pm [p]` | Kill streaks and multi-kill medals. | Title and `PM Bonus` cell depend on PM. |
 | `!rambo [p]` | Rambomatch counters. | Counted only in RM. |
 | `!achievements [p]`, `!ach`, `!badges`, `!achievementsi <pos>`, `!achi`, `!badgesi` | Unlocked achievements and season badges. | none |
 | `!achlist [p]`, `!achievementslist`, `!achlisti <pos>`, `!achievementslisti` | All 50 achievements with their goal. | none |
 | `!allweapons [p]`, `!weapons`, `!allweaponsi <pos>`, `!weaponsi` | Table of all weapons and the special weapon counters. | Bow rows and the flamer/bow row are always shown in RM. |
 | `!allweaponsby <metrics> [p]`, `!weaponsby`, `!allweaponsbyi <metrics> <pos>`, `!weaponsbyi` | The weapon table of `!allweapons`, sorted by weapon metrics. | Bow rows always shown in RM, as in `!allweapons`. |
-| `!wep <weapon> [p]`, `!weapon`, `!wepi <weapon> <pos>`, `!weaponi` | One weapon of one player plus server-wide data for it. | Hit zone row not for explosives. |
-| `!serverweapons`, `!serverweps`, `!srvweapons`, `!srvweps` | The weapon table of the whole server: every account added up. | Heavy list (one per `HeavyCooldownSeconds`). |
-| `!serverweaponsby <metrics>`, `!serverwepsby`, `!srvweaponsby`, `!srvwepsby` | The weapon table of `!serverweapons`, sorted by weapon metrics. | Heavy list; `!serverweaponsby help` is free. |
-| `!serverwep <weapon>`, `!serverweapon`, `!srvwep` | One weapon for the whole server, with the top killer and the best accuracy. | Heavy list; `!serverwep help` is free. |
+| `!wep <weapon> [p]`, `!weapon`, `!weap`, `!wepi <weapon> <pos>`, `!weaponi`, `!weapi` | One weapon of one player, with his own kill distances, times to kill and vest kills (the whole server's: `!serverwep`). | Hit zone row not for explosives. |
+| `!serverweapons`, `!serverweps`, `!serverweaps`, `!srvweapons`, `!srvweps`, `!srvweaps` | The weapon table of the whole server: every account added up. | Heavy list (one per `HeavyCooldownSeconds`). |
+| `!serverweaponsby <metrics>`, `!serverwepsby`, `!serverweapsby`, `!srvweaponsby`, `!srvwepsby`, `!srvweapsby` | The weapon table of `!serverweapons`, sorted by weapon metrics. | Heavy list; `!serverweaponsby help` is free. |
+| `!serverwep <weapon>`, `!serverweapon`, `!serverweap`, `!srvwep`, `!srvweap` | One weapon for the whole server, with the top killer, the best accuracy, the kill distances, times to kill, duels and picks of the server. | Heavy list; `!serverwep help` is free. |
 | `!matchup [weapon] [pg]`, `!matchups`, `!matrix` | Weapon against weapon results of the whole server, in pages. | none |
-| `!topweapons [pg]`, `!topweps`, `!topweaponsby <metrics>`, `!topwepsby` | Weapon rankings. | none |
+| `!topweapons [pg]`, `!topweps`, `!topweaps`, `!topweaponsby <metrics>`, `!topwepsby`, `!topweapsby` | Weapon rankings. | none |
 | `!top [pg]`, `!topp <pg>`, `!top <name>`, `!topi <pos>`, `!topme`, `!topid <slot>` | Points ranking, or the part around a player or position. | Rating column depends on the current mode. |
 | `!top <metrics>`, `!topby <metrics> [pg]` | Ranking by up to 5 metrics. | `rating`, `tier`, `skill`, `mmr`, `glicko`, `openskill` use the current mode or family. |
 | `!topo`, `!toponline` | Players on the server, by points. | none |
@@ -132,9 +133,14 @@ A few things are counted even while statistics are off: spectator time, the play
 | `!v`, `!vote`, `!nextmap`, `!lastmap`, `!randommap`, `!map [map]`, `!votemap`, `/votemap` | The map vote: vote yes, or start one. | Needs `[MapVote] Enabled`; a command switched off in `[MapVote]` gets no answer. |
 | `!maps [pg\|map]`, `!allmaps [pg\|map]`, `!searchmap <part> [pg]` | The maps list with the next and the last map; every map of the maps folder (with a map, both open at the page that has it); the maps of both whose name holds a text. | `[MapVote] Enabled` |
 | `/zs_mapvote [cancel]`, `/zs_maps [rescan]` | The map vote's settings and state; the maps folder and its problem files. | admins |
-| `!mapstats [map]` | Map record. | Sections depend on data and the current mode; leaders only for the running map. |
+| `!mapstats [map]` | Map record: the time played, the last game and the last load, how the survival rounds ended, the kill balance of the teams. | Sections depend on data and the current mode; leaders only for the running map. |
 | `!heatmap [map]`, `!heat` | Picture of where kills and deaths happen. | Flag bases are only known in CTF and INF. |
 | `!topmaps [pg or map]`, `!topmapsp <pg>`, `!topmapsi <pos>`, `!topmapsby <metrics>` | Map rankings. | Last column of `!topmaps` is `Selfs` in DM/PM/RM and `Flags` in team modes. |
+| `!mapplayerstats [map] [p]`, `!mapplayerotherstats [map] [p]`, `!mapplayerweapstats [map] [p]` (`!mapplayerwepstats`); the `i` forms `!mapplayerstatsi [map] <pos>` ... | One player on one map: the rows of `!stats` and the sections of `!otherstats` with what a per-map record keeps, and the weapon table of `!allweapons`. | Rows and sections of a mode (flags, rounds, teams, teamkills, draws, Rambo) in that mode or with such counters; `[Matrix] Enabled`. |
+| `!mapplayerrivals [map] [flag] [pg] [p]`, `!mapplayermatchup [map] [flag] [pg] [p]`, `!mapplayermatrix`, `!playerheatmap [map] [p]`; the `i` forms | The same player's rivals (with the points won from and lost to each), weapon matchups and kills and deaths on that map. | `!playerheatmap` needs `[Matrix] PlayerHeatmap`. |
+| `!playermaps [flag] [pg] [p]`, `!rivals [flag] [pg] [p]`, `!versus [flag] [pg] <p> [p2]`, `!playermatchup [weapon] [flag] [pg] [p]`, `!playermatrix`; the `i` forms | One player over all his maps: every map with time, K/D, results and points; his rivals; two players head to head; his weapons against the others'. | `[Matrix] Enabled` |
+| `!maprivals [map] [flag] [pg]`, `!mapmatchup [map] [weapon] [flag] [pg]`, `!mapmatrix` | One map with all its players: the pairs with the most fights; the weapon duels of the map. | `!maprivals` is a heavy list. |
+| `!mapweapstats [map] [flag] [pg]`, `!mapweapsstats`, `!mapwepstats`, `!mapwepsstats`, `!mapwep <weapon> [map]`, `!mapweapon`, `!mapweap` | The weapons of one map: every weapon used there; one weapon there with the players who killed most with it. | Heavy lists; the kills and picks of the map are counted with `[Matrix] Enabled = 0` as well. |
 | `!server`, `!serverstats` | Visitors, activity, server totals, hall of fame. | `FF Index` cell only with friendly fire on. |
 | `!activity` | Play time by weekday and hour. | none |
 | `!hud` and the HUD line | Rank and points on screen with short event notes. | Hidden for spectators. |
@@ -155,7 +161,7 @@ A few things are counted even while statistics are off: spectator time, the play
 | Developer API | 40 StatIDs and helper functions for other scripts. | StatIDs 4, 35, 36 and 39 depend on the current mode. |
 | Logs | `balance.log` (daily balance), `suspicious.log`, `audit.log`, `teambalance.log` (decisions of the team balance), `teambalance-history.log` (matches recorded for tuning), `integrity.log` (what the score guard took back). | none |
 
-Lists that go through every account (`!topby`, `!top <metrics>`, `!topday`/`week`/`month`, `!zs_search`, `!server`, `!serverweapons`, `!serverweaponsby`, `!serverwep`, `!topweapons`, `!topweaponsby`, `!topmapsby`, and `!topskill` with `elo`) are limited to one per `[Commands] HeavyCooldownSeconds` (5) per player and three per second on the whole server; admins have no per-player limit.
+Lists that go through every account (`!topby`, `!top <metrics>`, `!topday`/`week`/`month`, `!zs_search`, `!server`, `!serverweapons`, `!serverweaponsby`, `!serverwep`, `!topweapons`, `!topweaponsby`, `!topmapsby`, and `!topskill` with `elo`), and `!maprivals`, `!mapweapstats` and `!mapwep`, which go through every record of a map, are limited to one per `[Commands] HeavyCooldownSeconds` (5) per player and three per second on the whole server; admins have no per-player limit.
 
 ---
 
@@ -201,7 +207,7 @@ Header: `[ Stats: <name> ]`.
 | `Spectator:` | Seconds in the spectator team (counted also while statistics are off). | always |
 | `Selfkills:` | Selfkills. | always |
 | `Teamkills:` / `TK Deaths:` / `Assists:` | Teamkills made; deaths by a teammate; assists. | team modes, when friendly fire is on or the account has teamkills |
-| `Assists:` / `First Blood:` / `Clutches:` | Assists; first bloods; clutches won. | team modes without the row above; `Clutches:` when the current map has Survival on |
+| `Assists:` / `First Blood:` / `Clutches:` | Assists; first bloods (the first kill of a match); clutches won. | team modes without the row above; `Clutches:` when the current map has Survival on |
 | `First Dmg:` | Times the account dealt the first enemy damage of a match or round. | replaces `Clutches:` without Survival |
 | `Knife Throws:` | Knife throws. | when throws + stabs are above 0 |
 | `Knife Hits:` | Thrown knife hits on enemies. | same |
@@ -277,12 +283,13 @@ Header: `[ Detailed Telemetry: <name> ]`. The sections follow in this order.
 | Label as shown | What it means | When it is shown |
 | :--- | :--- | :--- |
 | `Max Streak:` | Most counted kills in one life. A death, a selfkill and a map change end the streak; a kill by the server in Survival (round end, team change) does not, so a streak can go on over several rounds. | always |
-| `First Bloods:` | First counted kill of a match; with Survival, of each round. | always |
+| `First Bloods:` | First counted kill of a match, once a match (with Survival too). | always |
+| `Round First Bloods:` | Survival: first counted kill of a round, in every round (the first kill of the first round is also the `First Bloods:` of the match). | when the current map has Survival on or the value is above 0 |
 | `First Damage:` | First enemy damage of a match (or of a Survival round). | always |
 | `Dominations:` | Times this player killed the same player 3 times in a row (without being killed by that player in between; the count restarts at map start). | always |
 | `Revenge Kills:` | The first kill of a player who killed this player since this player last killed them (an open revenge ends at map start). | always |
 | `Dominations Ended:` | Counted kills of a player who had 3 or more kills in a row on this player. | always |
-| `Last Stand:` | Team modes with Survival: a death (not a kill by the server) left this player as the last living human of the team while at least 2 enemy humans lived; once per team and round. DM/PM/RM: the player was the last human alive in a Survival round. | when the current map has Survival on or the value is above 0 |
+| `Last Stand:` | Team modes with Survival: a death (not a kill by the server) left this player as the last living human of the team while at least 2 enemy humans lived; once per team and round. DM/PM/RM: the player was the last human alive in a Survival round. Both only with at least `[Mechanics] LastStandMinPlayers` (3) humans in the round (in team modes the humans on the teams, dead or alive), so one against one is none. | when the current map has Survival on or the value is above 0 |
 | `Clutches Won:` | Team Survival: a round won by the team whose last-stand player this was. Not counted in DM/PM/RM, where the last one standing gets `Last Stand`. | when the current map has Survival on in a team mode, or the value is above 0 |
 | `Saviors:` | Team modes: counted kills of a player who had hit a teammate of the killer within `SaviorSeconds` (3). | in team modes, or when the value is above 0 |
 | `Avenger Kills:` | Team modes: counted kills of a player who had killed a teammate of the killer within `AvengerSeconds` (2). | same |
@@ -487,6 +494,42 @@ One line: `[Rank] <name> - Rank: <r>/<N> (<tier>) | Points: <p> | Rating: <x> | 
 
 If Steam has not answered yet the command says `Waiting for Steam to confirm your account, try again in a moment.`; without an account it says `Statistics are off for this session.`
 
+### !lastfight
+
+`!lastfight [1-3]` shows your own deaths since you joined the server, 1 = the last one; the last 3 are kept (runtime only: nothing is saved, and a leave clears them). A death's record holds what happened from `[LastFight] BeforeSeconds` (10) before it - not before that life began - to `AfterSeconds` (4) after it, or to the respawn; while those seconds still run, the report says `The seconds after this death are still being recorded`. The server console has no deaths (`!lastfight is for players on the server ...`), a player without one hears `No death of yours is recorded yet ...`, and with `Enabled = 0` the command says it is off. Bots keep no records; a bot that hit or killed a player is in that player's record, its shots worked out from its bullets (see `Dist`). The server's own kills (the end of a survival round, a team change) are no deaths here.
+
+Header: `[ Last Fight <n>/<kept>: <name> ]`, then:
+
+| Line | What it means |
+| :--- | :--- |
+| `Died <t> ago (<hh:nn:ss>) on <map>, <t> into the life` | When and where (`Died just now` within 5 s), and how long the life had lasted. |
+| `Killed by <name> with <weapon>` | The killer; `your teammate`, `(bot)`, `, who left the server` and `- after his own death` (his bullet or grenade was still flying) as it was. `You killed yourself with <weapon>`; `You died without a weapon hit: ...` (a fall, a deadly polygon, the kill command, a script). |
+| `The hit that killed you: <dmg> dmg to the <zone> from <m> m, you had <hp> HP and a vest` | The killer's hit in the moment of the death: its damage (at most the health that was left), zone, distance and the health before it. For the pellets or bullets of one shot: `The shot that killed you: <n> hits, <dmg> dmg (<zones>) ...`. |
+
+`Timeline (seconds from the death, <b> s before to <a> s after)`: the last 12 events of the record (`... <n> earlier events of these seconds are not shown` when there were more, or when a very long fight overflowed what is kept). The hits you took and the hits you dealt have the same cells: the distance, the flight time, the speed and the dodge estimate of a hit belong to the shot and to the one who was hit.
+
+| Column | What it means |
+| :--- | :--- |
+| `Time` | Seconds from the death: `-2.41` before it, `+0.35` after it. |
+| `Event` | `hit you`, `killed you` (the hit that killed), `own hit` (your own weapon), `you hit`, `you killed`, and the notes of your HUD: `points`, `assist`, `feat`. `x3` = the hits of one burst: the pellets or bullets of one shot, the bomblets of a cluster, a stream of flames or a blade; your hits on one player with one weapon within half a second. |
+| `Player` | The other player, `(mate)` after the name of a teammate (the name then cut to 6 letters); for a note its text (`-22 pts`, `Revenge!`). |
+| `Dmg` / `HP` | Damage, each hit at most the health that was left, and the health of the one who was hit before the (first) hit. |
+| `Zone` | `head`, `body`, `legs` from the damage; `~head` = a guess of the hit model (weapons whose zones do the same damage, like the Barrett); `?` = could not be told; `2h1b` = the zones of a burst; `-` = no zones (explosions, blades, flames). |
+| `Dist` | Meters from where the shot was fired to where it hit, like the kill distance - never from where the players stand. A shot `main.pas` saw (the ammunition of a human went down, or a grenade or a knife left his hand, with his position) gives it exactly. `~` = worked out from the bullet at the hit, for a shot nobody saw (a bot's, the stationary gun's): its velocity then, the speed it left the gun with (`Speed` of `weapons.ini` plus `InheritedVelocity` times the shooter's velocity, which `main.pas` sends with the hit) and Soldat's physics of a bullet (every tick gravity adds 0.135 pixels a tick, Soldat's default, and the bullet keeps 99% of its speed) lead back to the gun. That is exact while the shooter kept his pace from the shot to the hit; every pixel a tick he changed it along the line of fire moves it by about 3.6 m, and a bullet slowed by a body or a wall reads as a longer shot. Empty for blades, your own hits, a hit without a weapon, and a shot nobody saw whose bullet tells nothing: the Spas-12 (too slow for its gravity), explosions, flames and thrown knives. |
+| `Flight` | Seconds the bullet flew: from the distance and the bullet speed of the weapon (`weapons.ini`), the bullet keeping 99% of its speed each tick as in Soldat, or the ticks a bullet worked out as above flew (then with `~`). None for explosions, flames, blades and thrown knives. |
+| `Speed` | How fast the one who was hit moved - you for `hit you`, the other player for `you hit` and `you killed` - from his velocity at the hit, which `main.pas` sends with it (m/s, 14 pixels = 1 m). |
+| `Dodge (est.)` | Could the one who was hit have dodged it, read from the flight time: under 0.25 s `no` (nobody reacts that fast), up to 0.4 s `hard`, longer `maybe`; `(still)` = he stood still (under 2 m/s); `melee`, `blast`, `flame`, `thrown` = no estimate for blades, explosions, flames and thrown knives; `self` = your own weapon; `?` = no flight time. A kill of yours: `after death` when it came after you died. |
+
+`Who hurt you` (up to 5, most damage first): the player, the role (`killer`; `assist` = met the assist rule of `[Mechanics]` at the death - `AssistSeconds`, `AssistMinDamagePercent` of the health; `teammate`; `bot`; `yourself`), the weapons, hits, damage, the share of all the damage you took, the zones and when (seconds from the death).
+
+`What you dealt` (up to 5): the player, the weapons, hits, damage, zones and `killed at <t> s` or `killed +<t> s after your death` (`, teammate` for a teammate).
+
+`Points: -<n> for the death, +<n> won (+<n> after it); assists: <n>` adds up the notes of your HUD in those seconds; `Points: none - the statistics did not count then (too few players).` when the statistics were off.
+
+Five lines at the end say what the columns mean and what is estimated: `Time: s from your death (+ = after it)  HP: health before the hit  Zone: ~ = a guess, ? = not told`, `Dist: from where the shot was fired to the hit  Flight: time in the air` (ending in `(mate) = a teammate` when the timeline names one), `~ = worked out from the bullet at the hit (nobody saw the shot, e.g. a bot's): within a few m`, `Speed: of the one who was hit  Dodge (est.): under 0.25 s of flight no, to 0.4 s hard, then maybe` and `No flight or dodge for blasts, flames, blades, thrown knives; no ~ for Spas  (still) = stood still`.
+
+**After a death** (`DeathSummary = 1`), when the seconds after it are over or at the respawn, two console lines of at most 100 characters: `Killed by <name> (<weapon>, <m> m, <zone>): <n> hits, <dmg> dmg (<zones>); also hurt by <name> <dmg>, ...; -<n> pts` (a selfkill: `You killed yourself (<weapon>)`) and `You dealt <dmg> dmg: <name> <dmg>, ...; killed <name> after your death; +<n> pts; <n> assists - details: !lastfight` (or `You hit nobody in the last <s> s`). Not to a player who went to the spectators.
+
 ### !spree, !pm, !pointmatch
 
 Header: `Pointmatch & Spree Records: <name>` in PM, otherwise `Multi-Kill & Spree Records: <name>`.
@@ -587,7 +630,7 @@ Then:
 
 ### !serverweapons and !serverwep
 
-`!serverweapons` (`!serverweps`, `!srvweapons`, `!srvweps`) draws the table of `!allweapons` with the numbers of every account added together. Header: `All Weapons Breakdown: the whole server`. Over the whole server every kill with a weapon is somebody's death to it, so the deaths, the K/D and the damage taken would only repeat the kills: the columns are `Weapon`, `Kills`, `Share` (of all kills), `Pick%`, `Shots`, `Hits`, `Acc%`, `HS%`, `DmgOut` and `Time`. `Pick%` is the weapon's share of the spawns with a weapon of its group: the primaries, or the secondaries (Socom, knife, chainsaw, LAW), which every player spawns with as well - counted together, the Socom would always lead; `-` for a weapon nobody spawns with. Numbers of 10000 and more are shortened (`12.3k`, `1.2M`). After the table comes `Server totals`:
+`!serverweapons` (`!serverweps`, `!serverweaps`, `!srvweapons`, `!srvweps`, `!srvweaps`) draws the table of `!allweapons` with the numbers of every account added together. Header: `All Weapons Breakdown: the whole server`. Over the whole server every kill with a weapon is somebody's death to it, so the deaths, the K/D and the damage taken would only repeat the kills: the columns are `Weapon`, `Kills`, `Share` (of all kills), `Pick%`, `Shots`, `Hits`, `Acc%`, `HS%`, `DmgOut` and `Time`. `Pick%` is the weapon's share of the spawns with a weapon of its group: the primaries, or the secondaries (Socom, knife, chainsaw, LAW), which every player spawns with as well - counted together, the Socom would always lead; `-` for a weapon nobody spawns with. Numbers of 10000 and more are shortened (`12.3k`, `1.2M`). After the table comes `Server totals`:
 
 | Label as shown | What it means |
 | :--- | :--- |
@@ -600,19 +643,32 @@ Then:
 
 Then the section `Melee, Throws & Combat Hurts` of `!allweapons`, counted over every account.
 
-`!serverwep <weapon>` (`!serverweapon`, `!srvwep`) is the deep dive of `!wep` for the whole server. Header: `Weapon: <weapon> - the whole server`. Rows: kills, their share of all kills and how many accounts ever used the weapon; the damage dealt with it as kills (`~<y> kills`), per kill and per hit (the damage taken from it would only repeat the damage dealt); shots, hits (with the accuracy for the guns) and time; headshots (for the weapons with hit zones), hits per kill and the longest kill. Then `Top killer` (the account with the most kills), `Best accuracy (200+ shots)`, `Sweet Spot`, the `Reloading` section of `!wep` counted over every account, and the same `Server-wide for this weapon` section as `!wep`.
+`!serverwep <weapon>` (`!serverweapon`, `!serverweap`, `!srvwep`, `!srvweap`) is the deep dive of `!wep` for the whole server. Header: `Weapon: <weapon> - the whole server`. Rows: kills, their share of all kills and how many accounts ever used the weapon; the damage dealt with it as kills (`~<y> kills`), per kill and per hit (the damage taken from it would only repeat the damage dealt); shots, hits (with the accuracy for the guns) and time; headshots (for the weapons with hit zones), hits per kill and the longest kill. Then `Top killer` (the account with the most kills), `Best accuracy (200+ shots)`, `Sweet Spot`, the `Reloading` section of `!wep` counted over every account, and the section `Server-wide for this weapon`:
+
+| Label as shown | What it means | When it is shown |
+| :--- | :--- | :--- |
+| `Kill distance: <10m .. 100m+` | Share of the counted kills with this weapon in the ranges under 10, 10-25, 25-50, 50-100 and 100 m or more (kills with a known distance), with a bar under each share. | when such kills exist |
+| `Avg Kill Dist:` | Average kill distance with the weapon. | always |
+| `Avg TTK:` | Average time from the first hit to the kill with the weapon (`-` if none). | always |
+| `Vest kills:` | Counted kills with this weapon of victims wearing a vest. | when above 0 |
+| `Nemesis: <weapon> (<n>)` | The weapon that most often killed players holding this weapon (never the weapon itself). | when any other weapon has |
+| `Top Victim: <weapon> (<n>)` | The weapon most often held by players this weapon killed (never the weapon itself). | when any other weapon has |
+| `Picks:` | How often human players took the weapon (primary or secondary) for a life while statistics were on: the weapons of the spawn or, when the weapon menu was open at the spawn, the first ones taken after it. A later change in the same life is no pick. | for USSOCOM through M72 LAW, or any other weapon with picks |
+| `Alpha picks: <n> (<x>%)` / `Bravo picks: <n> (<x>%)` | The same picks of players in Alpha and in Bravo, and their share of the picks made in a team. | in team modes, when players in a team took the weapon |
+| `Of primaries: <x>%` / `Of secondaries: <x>%` | The weapon's share of the picks of its group (secondaries: Socom, knife, chainsaw, LAW). | when the weapon was picked |
+| `Charlie/Delta picks: <c>/<d>` | Picks of players in Charlie and Delta (Teammatch). | same, when above 0 |
 
 Both commands read every account, so they are heavy lists: one per `[Commands] HeavyCooldownSeconds` per player (admins have no limit). `!serverwep help` lists the weapon names and is free.
 
 ### !allweaponsby and !serverweaponsby
 
-`!allweaponsby <metrics> [p]` (`!weaponsby`), `!allweaponsbyi <metrics> <pos>` (`!weaponsbyi`) and `!serverweaponsby <metrics>` (`!serverwepsby`, `!srvweaponsby`, `!srvwepsby`) draw the weapon table of `!allweapons` or of `!serverweapons` sorted by up to 5 [weapon metrics](#weapon-metrics-topweaponsby). Header: `All Weapons by <m1> > <m2> ...: <name>` (`: the whole server`, or `: all servers` with `SharedWeapons`); metric names that would not fit the line are written ` > ...`.
+`!allweaponsby <metrics> [p]` (`!weaponsby`), `!allweaponsbyi <metrics> <pos>` (`!weaponsbyi`) and `!serverweaponsby <metrics>` (`!serverwepsby`, `!serverweapsby`, `!srvweaponsby`, `!srvwepsby`, `!srvweapsby`) draw the weapon table of `!allweapons` or of `!serverweapons` sorted by up to 5 [weapon metrics](#weapon-metrics-topweaponsby). Header: `All Weapons by <m1> > <m2> ...: <name>` (`: the whole server`, or `: all servers` with `SharedWeapons`); metric names that would not fit the line are written ` > ...`.
 
 - The metrics of `!allweaponsby` are its first word, several of them joined by `;` or `,` (`!allweaponsby kd;acc`, `!allweaponsby kd; acc Alice`); what follows is the player, or the ranking position of `!allweaponsbyi`. `!serverweaponsby` takes metrics only, separated by space, comma or semicolon. A metric given twice counts once; unknown words are listed as `[Note] Ignored unknown metric(s): ...`.
 - The rows are the weapons of the plain table: USSOCOM to M72 LAW always, the others when they have kills, deaths, shots, hits, time or damage (with `!serverweaponsby` also picks; with `!allweaponsby` in RM the two bows always). There are no sections: every row is sorted.
 - Sorted by the first metric, ties by the next ones, then by kills, then in the order of the plain table. Best first: the highest value, or the lowest for the metrics that are lower-is-better (`ttk`, `reloadtime`, `dmgperkill`, `kdmgratio`), where 0 counts as no value. A value that means nothing for a weapon is `-` and comes last: the accuracy of a weapon without shots of its own or without a shot yet, the headshots of a weapon without hit zones, the shots of the chainsaw, the flamer, the fists and the stationary gun, the reloads of a weapon that has none (knife, flamer, stationary gun, fists, grenades), a share or a ratio of nothing.
 - Columns: `Weapon`, the metrics in their order, then the columns of the plain table that are no metric of the list (`!allweapons`: `Kills`, `Deaths`, `K/D`, `Shots`, `Hits`, `Acc%`, `HS%`, `DmgOut`, `DmgR`, `Time`; `!serverweapons`: `Kills`, `Share`, `Pick%`, `Shots`, `Hits`, `Acc%`, `HS%`, `DmgOut`, `Time`), with the values as there. Every column is as wide as its longest cell and two spaces; columns of the plain table that do not fit the 100 characters of a line are left out, from the end (with five long metrics the last ones go).
-- Kill distances, times to kill, picks and vest kills are counted for the whole server, not per account: `avgdist`, `ttk`, `picks`, `pick%`, `vestkills`, `alphapicks` and `bravopicks` work with `!serverweaponsby`, and `!allweaponsby` names them in `[Note] Counted for the whole server only (!serverweaponsby): ...` instead.
+- `avgdist`, `ttk`, `picks`, `pick%`, `vestkills`, `alphapicks` and `bravopicks` sort by the server record (kill distances, times to kill and picks counted for the whole server) and work with `!serverweaponsby`; `!allweaponsby` names them in `[Note] Counted for the whole server only (!serverweaponsby): ...` instead. A player's own kill distances, times to kill and vest kills with a weapon (kept since 5.5) are in `!wep`.
 - Without metrics, or with `help`, each command lists the metrics it takes. On the server console `!allweaponsby` needs a player. `!serverweaponsby` reads every account, so it is a heavy list like `!serverweapons` (its help and a text without a metric are free); `!allweaponsby` reads one account. Neither has pages: `/zs_next` and the others go on with the last list that has them.
 
 ### !wep
@@ -651,16 +707,11 @@ Both commands read every account, so they are heavy lists: one per `[Commands] H
 | `At death: <x>% of the reload done` | How far those reloads had got, on average. | same |
 | `Rounds thrown away:` | Rounds that were still in the magazine when a manual reload started (the Spas-12 loads on top of its shells and throws none away). | same |
 | `Time reloading:` | All the time spent reloading this weapon. | same |
-| `Kill distance: <10m .. 100m+` | Server-wide: share of counted kills with this weapon in the ranges under 10, 10-25, 25-50, 50-100 and 100 m or more (kills with a known distance). | section `Server-wide for this weapon`, when such kills exist |
-| `Avg Kill Dist:` | Server-wide average kill distance with the weapon. | section |
-| `Avg TTK:` | Server-wide average time to kill with the weapon (`-` if none). | section |
-| `Vest kills:` | Server-wide counted kills with this weapon of victims wearing a vest. | section, when above 0 |
-| `Nemesis: <weapon> (<n>)` | Server-wide: the weapon that most often killed players holding this weapon (never the weapon itself). | section, when any other weapon has |
-| `Top Victim: <weapon> (<n>)` | Server-wide: the weapon most often held by players this weapon killed (never the weapon itself). | section, when any other weapon has |
-| `Picks:` | Server-wide: how often human players took the weapon (primary or secondary) for a life while statistics were on: the weapons of the spawn or, when the weapon menu was open at the spawn, the first ones taken after it. A later change in the same life is no pick. | section, for USSOCOM through M72 LAW, or any other weapon with picks |
-| `Alpha picks: <n> (<x>%)` / `Bravo picks: <n> (<x>%)` | The same picks of players in Alpha and in Bravo, and their share of the picks made in a team. | section, when players in a team took the weapon |
-| `Of primaries: <x>%` / `Of secondaries: <x>%` | The weapon's share of the picks of its group (secondaries: Socom, knife, chainsaw, LAW). | section, when the weapon was picked |
-| `Charlie/Delta picks: <c>/<d>` | Picks of players in Charlie and Delta (Teammatch). | same, when above 0 |
+| `Kill distance: <10m .. 100m+` | The player's own counted kills with this weapon in the ranges under 10, 10-25, 25-50, 50-100 and 100 m or more (kills with a known distance), with a bar under each share. | section `Distances and times to kill`, when such kills exist |
+| `Avg Kill Dist:` | The player's average kill distance with the weapon (`-` without one). | section |
+| `Avg TTK:` | The player's average time from the first hit to the kill with the weapon (`-` if none). | section |
+| `Vest kills:` | The player's kills with this weapon of victims wearing a vest. | section, when above 0 |
+| `Counted for every account since 5.5: ...` | An account keeps these since 5.5; kills from before have none. | section, when the weapon has kills but none of them is counted so |
 | `Explode Hurts:` / `TK: <a> \| Self: <b>` | M79: damage events on enemies; friendly and self hits. | M79 only |
 | `Throws: <t> (Hits: <h>)` / `Stabs: <s> (TK: <f>)` | Knife: throws and thrown hits on enemies; stabs on enemies and on teammates. | knife only |
 | `Self Hits:` / `TK Throw Hits:` | Knife: thrown knife self hits and friendly hits. | knife, when one of them is above 0 |
@@ -673,6 +724,8 @@ Both commands read every account, so they are heavy lists: one per `[Commands] H
 | `Fist Hurts:` / `TK Hurts:` | Fist hits on enemies and teammates. | fists only |
 | `Throws: <t>, enemy hits <h> (<x>%)` / `TK: \| Self: \| Kills:` | Frag throws and enemy damage events; friendly and self hits; `Kills` is the grenade kill counter, which includes cluster kills. | grenade only |
 | `Throws: <t>, enemy hits <h>` / `TK: \| Self:` | Cluster throws and enemy damage events; friendly and self hits. | cluster only |
+
+Under the table: `The whole server: !serverwep <weapon>   against the other weapons: !playermatchup <weapon> [p]`.
 
 Weapon names accepted: numbers 0-16, 30, 50, 51, 52 (cluster), 53 (knife), 255 (fists), and the names listed under [weapon metrics](#weapon-based-player-metrics), with a few more words for each weapon (`sniper` and `m82` for the Barrett, `shotgun` for the Spas, `gl` for the M79 ...). The search takes the strongest match it finds: a whole word, then the beginning of the short name, then the beginning of any word (`barr` = Barrett M82A1), then a part of a word (3 letters or more), then one typo (4 letters or more; two from 7 letters). A text that fits more than one weapon gets the list of what it could be, for example `!wep m` - `HK MP5 (mp5), M79 (m79), ...`. With more words, the longest beginning that names a weapon is the weapon and the rest is the player (`!wep desert eagles bob`); whole names are tried before parts of names, and a name of several words has to be whole (`!wep deagle s` is player "s"). A weapon number is digits only. When the rest is a number that no player has in the name, the answer points to `!wepi`, which takes a ranking position.
 
@@ -705,7 +758,7 @@ Server-wide weapon duels. A duel result is added for every counted kill: the kil
 
 ### !topweapons and !topweaponsby
 
-`!topweapons [pg]` ranks weapons by server-wide kills; `!topweapons <weapon> [pg]` instead ranks the players who used that weapon (a trailing number is the page, unless it is part of the weapon's own name: `ak 47`, `ruger 77`, `spas 12`); `!topweaponsby <metrics> [pg]` ranks the weapons by up to 5 [weapon metrics](#weapon-metrics-topweaponsby), and so does `!topweapons <metric>` when the word is a metric rather than a weapon. `!topweaponsby` alone, or `!topweaponsby help`, shows the metric names.
+`!topweapons [pg]` ranks weapons by server-wide kills; `!topweapons <weapon> [pg]` instead ranks the players who used that weapon (a trailing number is the page, unless it is part of the weapon's own name: `ak 47`, `ruger 77`, `spas 12`); `!topweaponsby <metrics> [pg]` ranks the weapons by up to 5 [weapon metrics](#weapon-metrics-topweaponsby), and so does `!topweapons <metric>` when the word is a metric rather than a weapon. `!topweaponsby` alone, or `!topweaponsby help`, shows the metric names. `!topweps` and `!topweaps` are `!topweapons`, `!topwepsby` and `!topweapsby` are `!topweaponsby`.
 
 **`!topweapons <weapon> [pg]`**: header `Top Players with <Weapon>[ of All Servers] [Page p/P] (<n> players)`, 15 rows per page, sorted by kills with the weapon, ties by damage dealt with it, then by fewer deaths to it. `Nobody has used the <Weapon> yet.` when no account has it.
 
@@ -892,7 +945,7 @@ The library's own map vote of `[MapVote]`; see [README.md](README.md#map-vote) f
 | Output | What it means |
 | :--- | :--- |
 | `[Map vote] off ([MapVote] Enabled = 0): the server's own map vote works as usual.` | `Enabled = 0`. |
-| `[Map vote] on: passes with <pct>% of <who>, fails after <n> s` | `who` is "the players" (`CountSpectators = 1`) or "the players on the teams". |
+| `[Map vote] on: passes with <pct>% of <who>, fails after <n> s` | `who` is "the players" (`CountSpectators = 1`) or "the players on the teams and voting spectators" (`CountSpectators = 0`: a spectator counts only for a vote they start or vote for). |
 | `[Map vote] none in the first <n> s of a map or with less than <m> s left, a starter waits <s> s` | `BlockAfterChangeSeconds`, `MinTimeLeftSeconds`, `StarterCooldownSeconds`. |
 | `[Map vote] at least <n> player(s), maps outside the list: yes/no, vote percent put back: <pct>` | `MinPlayers`, `AllowAnyMap`, `RestoreVotePercent`. |
 | `[Map vote] running: <map>, <n> s left, <yes>/<voters>` then `[Map vote] asked by <name> <time> ago - /zs_mapvote cancel ends it.` | The vote that runs, and how long ago it was asked (`just now` at first). |
@@ -935,7 +988,7 @@ The library's own map vote of `[MapVote]`; see [README.md](README.md#map-vote) f
 
 | Label as shown | What it means | When it is shown |
 | :--- | :--- | :--- |
-| `Time:` | Seconds the map ran while statistics were on. | always |
+| `Played Time:` | Seconds the map ran while statistics were on. | always |
 | `Matches:` | Counted matches (see match results). | always |
 | `Kills:` | Counted kills on the map. | always |
 | `Selfkills:` | Selfkills on the map. | always |
@@ -946,14 +999,15 @@ The library's own map vote of `[MapVote]`; see [README.md](README.md#map-vote) f
 | `Joins:` | Humans who joined while the map ran (always counted). | always |
 | `Spec Joins:` | Humans who moved to the spectators during the map. Arriving on the server as a spectator is not counted, and neither are moves made by the balance, `/move`, `/swap` or `/mix`. One switch counts per `[Ranking] TeamSwitchCountSeconds` (5 s); every further switch pushes that window, so going game - spec - game - spec in a loop counts once. | always |
 | `Kicks:` | Leaves that the server reported as kicks (always counted). | always |
-| `Last:` | When the map last started or last ended a counted match. | always |
+| `Last Played:` | The last second the map was played with statistics on (before 5.5 it was set when the map was loaded, so old data may still show such a date). | always |
+| `Last Loaded:` | The last time the map was started, with or without players. | always |
 | `Loads:` | Times the map was started (always counted). | always |
 | `Aborted:` | Matches that ended before the time or score limit (always counted). | always |
-| `Draws:` | Counted team matches that ended in a draw: two teams on the same highest score. A free-for-all draw counts for the players only, not here. | always |
+| `Draws:` | Counted team matches that ended in a draw: two teams on the same highest score. A free-for-all draw counts for the players only, not here. | team modes |
 | `Votes: <n> (<w> won)` | Map votes started while this map ran, and how many of them changed the map. With `[MapVote] Enabled = 1` (default) these are the library's own map vote (see [Map vote](#map-vote) below): a vote counts here when it starts, and as won when it passes. With `Enabled = 0` a vote counts as won when the map changes to the voted map within 60 s of the vote's start or of its last vote cast (always counted); these are then Soldat's own map votes (the vote menu, `/votemap`), also one another script starts with `Game.StartVoteMap`, which is counted from the first vote cast for it. A vote a script counts entirely on its own (chat commands such as `!v`) is not seen, only the map change it makes. | always |
 | `Avg Humans:` | Average number of humans in the game, over the seconds counted in `Time`; `-` before the map has such a second. | always |
-| `Close:` | Counted team matches that ended in a draw or with the winner at most 1 point ahead of the next team. | always |
-| `Comebacks:` | Counted team matches won by a team that was 2 or more points behind the leader at some point. | always |
+| `Close:` | Counted team matches that ended in a draw or with the winner at most 1 point ahead of the next team. | team modes |
+| `Comebacks:` | Counted team matches won by a team that was 2 or more points behind the leader at some point. | team modes |
 | `First:` | Date the map record was created. | always |
 | `Avg Win Score:` | The score of the winner, summed over the matches counted this way (team: the best team's score; free-for-all: the winner's score, only when the match had one) / their count. Scores kept from before this counting began are set aside once, so the average starts with the first match measured after that; until then `-`. | always |
 | `Base Gap: <x> m` | Distance between the Alpha and Bravo flag bases. | in CTF, Infiltration or Hold the Flag, once both bases are known |
@@ -963,7 +1017,14 @@ The library's own map vote of `[MapVote]`; see [README.md](README.md#map-vote) f
 | `Alpha: <n> wins` ... `Delta: <n> wins` | Counted match wins per team (section `Team Breakdown (Alpha / Bravo / Charlie / Delta)`). | when Charlie or Delta have match or round wins |
 | `Alpha <n> wins (<x>%) [bar] (<y>%) <m> wins Bravo` | Match wins of Alpha against Bravo (section `Match Win Bias: Alpha [#] vs Bravo [=]`). | otherwise, when Alpha + Bravo wins are above 0 |
 | `Alpha share is between <a>% and <b>% (95% confidence, <n> matches)` | Wilson 95% range of Alpha's win share. | same |
-| `Alpha <n> rounds (<x>%) [bar] (<y>%) <m> rounds Bravo` | Survival rounds won by Alpha and Bravo (section `Survival Round Balance (Alpha vs Bravo)`). | when they have rounds and the current map has Survival on or there are more than 5 rounds |
+| `Alpha <n> rounds (<x>%) [bar] (<y>%) <m> rounds Bravo` | Survival rounds won by Alpha and Bravo (section `Survival Round Balance (Alpha vs Bravo)`). | team modes, when they have rounds and the current map has Survival on or there are more than 5 rounds |
+| `Alpha <n> kills (<x>%) [bar] (<y>%) <m> kills Bravo` | Counted kills made by the players of Alpha and of Bravo on the map (section `Kill Balance: Alpha [#] vs Bravo [=]`); with Charlie or Delta kills one row `Alpha: <n> kills` ... `Delta: <n> kills` (section `Kill Balance (Alpha / Bravo / Charlie / Delta)`). Counted in team modes. | team modes, when the teams have kills |
+| `Alpha by elimination:` ... `Delta by elimination:` | Survival rounds a team won by wiping out the other teams (section `How the Survival Rounds Ended`), counted where the round wins of the map are counted. | team modes: Alpha and Bravo with Survival on, any team when above 0 |
+| `By capture:` | Survival rounds ended by a capture (CTF, INF). | team modes: CTF or INF with Survival on, or when above 0 |
+| `Last one standing:` | Free-for-all survival rounds won by the last player standing. | free-for-all with Survival on, or when above 0 |
+| `Team rounds:` | In a free-for-all mode: the team rounds of the map (by elimination or capture) together, without the teams. | free-for-all, when above 0 |
+| `No survivor:` | Survival rounds without a winner: nobody was left standing (the last ones died together, or a bot won a free-for-all round). | with Survival on, or when above 0 |
+| `Cut by map change:` | Survival rounds that were still running when the map changed. | with Survival on, or when above 0 |
 | `Over the match (each 10%): <ten numbers>` | Average players on the teams in every tenth of a match, from the start to the end (section `Players on this Map`). The tenth follows from the time played and the time left, so it needs a time limit; seconds without players are not counted. `-` for a tenth without data. | when at least 60 such seconds were counted |
 | `Voted in:` | Times a won vote chose this map. | section, shown when there is a curve, a measured map end or a vote |
 | `Voted away:` | Votes started on this map that changed the map (the `won` of `Votes`). | same |
@@ -1024,7 +1085,52 @@ The library's own map vote of `[MapVote]`; see [README.md](README.md#map-vote) f
 | `Selfs` | Selfkills (when the current mode is DM, PM or RM). |
 | `Flags` | Flag captures (when the current mode is a team mode). |
 
-`!topmapsby <metrics> [pg]`: header `Top Maps by <metrics> [Page p/P]`, 10 per page, up to 5 [map metrics](#map-metrics-topmapsby), ties by played time. With one metric the columns are `#`, `Map Name`, the metric, `Kills`, `Matches`, `Playtime` (a column equal to the metric is left out).
+`!topmapsby <metrics> [pg]`: header `Top Maps by <metrics> [Page p/P]`, 10 per page, up to 5 [map metrics](#map-metrics-topmapsby), ties by played time. With one metric the columns are `#`, `Map Name`, the metric, `Kills`, `Matches`, `Playtime` (a column equal to the metric is left out). A date metric alone (`lastplayed`, `lastloaded`) shows the hour as well, `never` for a map without one.
+
+### Per-map views
+
+What every player did on every map (`[Matrix]`): one record per account and map, made at the first event counted for the account on the map (humans only, while statistics are on, with `[Matrix] Enabled = 1`). A record keeps what `!mapplayerstats` and the others show below; the lists inside it (weapons, rivals, weapon matchups, heat cells) hold only what happened. The records exist since 5.5.
+
+**Old per-map data.** The daily work at `[Inactivity] BalanceHour` deletes the records of an account not seen for `[Matrix] MatrixPruneDays` (90) days (its last join or leave, `Last Seen` of `!status`; 0 = never), with everything they hold: its counters on every map, its weapons there, its rivals (player against player, with the points and the damage both ways), its weapon matchups and its heat cells. The line of the daily balance on the console and in `balance.log` then ends in `; <n> player-on-map records of accounts not seen for <d> days removed ([Matrix] MatrixPruneDays)`. What stays: the account's own statistics, the maps' own counters and weapon matchups, and the rival entries the other players keep about the account, which go on showing its name. An account deleted altogether (`/removeolderthan`) takes the entries that name it along; the entries of an account merged into another (`/zs_merge`) name the other one. The views say how far back they reach: `Per-map data: counted since 5.5 while the statistics count; deleted after <n> days without play.`
+
+A view without a record says `No per-map data yet for <name> on <map>.`; with `[Matrix] Enabled = 0` the views say `Per-map player data is not recorded on this server ([Matrix] Enabled = 0).`, and a record made before is shown with `Not recorded any more ([Matrix] Enabled = 0): this was recorded before.` A rival this server has no account of is shown by its number (`#<id>`, in lists `#<id> (gone)`).
+
+The words of a per-map command, in this order: the map, when the first word names a map of the statistics - its exact name, else the closest name as the map vote finds it (the whole name, its beginning, the beginning of a word, any part; the shorter first) -, unless it is a number, a sort flag of the command, the start of a weapon's name (the commands that take a weapon) or exactly the name of a player on the server and of no map; then the weapon; then the sort flags; then the page number; then the player - or, in the `i` form of a command, the position in the points ranking (the last number). A text without a map is the map being played, one without a player the caller: `!mapplayerstats ctf_ash Alice`, `!mapplayerstats ash`, `!mapplayerstats Alice`, `!mapplayerstats`, `!mapplayerrivals ctf_ash 2 Alice` (page 2), `!mapplayerrivals lost Alice`, `!mapplayerrivalsi ctf_ash 2 3` (page 2 of the third place). The lists keep the order of before as well: a number after the player is the page (`!rivals Alice 2`). A word that is neither a map nor a player gets `Player not found.` and `"<word>" is no map of the statistics either (!topmaps lists them).`; an `i` form with words that are no position gets its usage (`Usage: !rivalsi [flag] [pg] <n>  (n = a position of the points ranking)`). A player whose nick is a number or a sort flag is found by his `#id`.
+
+**Sort flags.** Each list takes the flags of its kind; the last one given counts, `asc` turns the order round, and the title says the order (`Rivals of Alice, all maps, by points lost (asc) [Page 1/2] (23)`). `<command> help` lists them. A value that means nothing for a row (the accuracy of a knife) comes last either way.
+
+| Lists | Flags (the first is the default) |
+| :--- | :--- |
+| `!rivals`, `!mapplayerrivals`, the maps of `!versus` | `fights` (kills both ways), `kills` (the player killed the rival), `deaths` (the rival killed the player), `kd`, `delta` (points won - lost, the best first), `won` (on whom the player gains the most), `lost` (who takes the most points from the player), `dmg` (dealt to the rival), `dmgin` (taken from the rival), `last` (the newest fight first) |
+| `!maprivals` | `fights` (kills both ways), `dmg` (damage both ways), `points` (points won both ways), `delta` (the most one-sided in points first), `last` |
+| `!playermatchup`, `!mapplayermatchup`, `!mapmatchup` | `duels` (won and lost), `wins`, `losses`, `rate` (the share of the duels won); `!mapmatchup` without a weapon lists pairs of weapons, and its `wins`, `losses` and `rate` are the first weapon's |
+| `!playermaps` | `time` (played), `kills`, `deaths`, `kd`, `points` (won - lost on the map), `wins` (matches won), `last` (the newest game first) |
+| `!mapweapstats` | `kills` (on the map, all time), `picks`, `shots`, `hits`, `acc`, `hs` (the share of headshots), `dmg`, `time`, `players` |
+
+**Points won and lost against a rival.** Every rival entry keeps `PointsWon`, the points the account won from him, and `PointsLost`, the points it lost to him, counted on the map where they moved: a kill adds to the killer's entry of the victim what the kill paid him and to the victim's entry of the killer what it cost the victim - as the points really moved, after the inactive-victim rule of `[AntiFarm]` and `[Ranking] MinimumPoints` (a victim at the floor loses less than his killer wins). With `[Ranking] SelfkillMode = zerosum` a selfkill under an enemy's fire moves its points the same way (the enemy's entry wins, the selfkiller's loses), with no kill or death. The penalties of teamkills and selfkills (they go to nobody), the capture pool of Capture the Flag (the enemy team pays the capping team) and the daily balance of `[Inactivity]` are no rival's points. `Pts Delta` is `Pts Won` less `Pts Lost`; over all maps the maps are added up. An account merged into another brings its points along, and with `[MySQL] Engine = mysql` the servers add them up like the kills.
+
+| Command | What it shows |
+| :--- | :--- |
+| `!mapplayerstats [map] [p]`, `!mapplayerstatsi [map] <pos>` | `[ Map Stats: <name> on <map> ]`: the rows of `!stats` in their places, with what the record of the map has. Where `!stats` has the rank, the points and the rating: `Map Points` (won minus lost on the map), `Played` and `Kills/h`; then kills, deaths, K/D; `Best Streak`, `Avg Life` (the time alive on the map / its ended lives), `Dmg Ratio`; `Dealt` and `Taken` as kills and deaths (when any), with `TK Dmg` (team modes with friendly fire or such damage) or `Assists` (free-for-all); `Healed`, `Regen`, `Heal Kits` (when any); `Dmg/min alive`, `Kills/min alive`, `Longest Life`; `Longest`, `Barrett`, `Avg Dist` (when the longest kill is above 0); `Accuracy`, `Hits`, `Headshots`; `Matches: <n> (<w>W / <l>L)`, `Win%` and `Draws` (team modes, or above 0); `Rounds`, `Round Win%` and `Round First Bloods` with Survival on or when the record has rounds; the flag row (`Flag Caps`, `Returns`, `Held (Grabs)`) in CTF, INF and HTF or with flag counters; the team row of `!stats` in team modes (`Teamkills`, `TK Deaths` and `Assists` with friendly fire or teamkills, else `Assists`, `First Blood` and `Clutches` with Survival on or `First Dmg`); the knife row and the Rambo row as in `!stats`; where `!stats` has the season: `First Bloods` (outside that team row), `Round First Bloods` (when there is no rounds row), `Last Stands` (Survival, or above 0), `Teamkills` (outside team modes, when above 0) and `Selfkills`; `First Played` and `Last Played`. |
+| `!mapplayerotherstats [map] [p]`, `!mapplayerotherstatsi [map] <pos>` | `[ Map Telemetry: <name> on <map> ]`: the sections of `!otherstats` in their order, with what the record of the map has. `Damage & Healing`: the damage dealt and taken and their ratio; `Healed`, `Regen`, `Heal Kits` and the kits picked up by kind (all also at 0); `TK Dmg Out`, `TK Dmg In`, `TK Kills/Deaths` (when the record has friendly damage or teamkills); `Dmg/Kill`, `Dmg/Death`. `Rivals on this Map`: `Fav Victims` (the most kills of them), `Top Nemeses` (the most deaths by them), `Pts Won From` (the most points won from them), `Pts Lost To` (the most points lost to them), three each, and `Players fought here`. `Hitzones, Aim & Distance`: the zones, `Longest Kill`, `Longest Barrett`, `Avg Kill Dist`, `100m+ Kills`, `Barrett Long`, `Unclear Zone`, accuracy and hits. `Timing, Movement & Positioning` as in `!otherstats` (the spawn kills and deaths not with Survival on, unless above 0). `Feats & Streaks`: the cells of `Combat Feats & Streaks`, in the same modes (`Best Streak` for `Max Streak`), then `Under Fire: <n> (<x>%)` - the selfkills within `AssistSeconds` of an enemy's hit and their share of the selfkills, when there are any - and `Map Points`. `Flags on this Map`: the rows of `CTF & Objective Telemetry` (objective modes, or flag counters). `Matches & Rounds` (`Matches` without rounds): wins, losses, `Win Rate` (with the draws in team modes or when above 0), the rounds (Survival, or rounds), `Adv Won`, the results on `Alpha` and `Bravo` (when any) and `Left Lost Matches` (team modes, or above 0). `Multi-Kill Medals` (Double to Stop It), `Melee, Explosives & Heavy Arsenal` and `Teamplay & Friendly Incidents` (team modes with friendly fire, or such counters) as in `!otherstats`. `Time on this Map`: `Played`, `Matches Played`, `Kills/h`, `First Played`, `Last Played`, `Dmg/min`. `Weapons on this Map`: `Most Kills`, `Most Held`, `Weapons Used`. |
+| `!mapplayerweapstats [map] [p]`, `!mapplayerweapstatsi [map] <pos>` (`!mapplayerwepstats`, `!mapplayerwepstatsi`) | `Map Weapons: <name> on <map>`: the table of `!allweapons` with the weapons of the record only; `Share` (in place of `DmgR`, which a record does not keep) is the weapon's share of the kills on the map. Below it the damage rows of `!wep` for the map. |
+| `!mapplayerrivals [map] [flag] [pg] [p]`, `!mapplayerrivalsi [map] [flag] [pg] <pos>` | `Rivals of <name> on <map>, by <order> [Page p/P] (<n>)`: every opponent of the record, the most fights (kills plus deaths between the two) first, of equal ones the latest fight: `Kills` (the account killed him), `Deaths` (he killed the account), `K/D`, `Pts Won`, `Pts Lost`, `Pts Delta` (signed), `Dmg Out`, `Dmg In`, `Last Fight`. |
+| `!mapplayermatchup [map] [flag] [pg] [p]`, `!mapplayermatchupi [map] [flag] [pg] <pos>` (also `!mapplayermatrix`, `!mapplayermatrixi`) | `Weapon Matchups of <name> on <map>, by <order>`: every pair of the account's weapon and the weapon the other player held, the most duels first: `Duels`, `Won` (the account killed him), `Lost` (he killed the account) and `Edge` as `Matchup Edge` of `!matchup <weapon>`. |
+| `!playerheatmap [map] [p]`, `!playerheatmapi [map] <pos>` | `[ Where <name> kills and dies: <map> ]`: the picture of `!heatmap` with the account's own kills and deaths, drawn in the frame of the map's own heatmap, the kills and deaths with the number of cells they fell in, and the three busiest cells. Needs `[Matrix] PlayerHeatmap = 1`. |
+| `!playermaps [flag] [pg] [p]`, `!playermapsi [flag] [pg] <pos>` | `Maps of <name>, by <order> [Page p/P] (<n> maps)`: every map of the account, the one played longest first: `Time`, `Kills`, `Deaths`, `K/D`, `Won/Lost` (matches), `Points` (won minus lost there), `Last Played`; the map being played marked ` <actual>`; the last row adds up every map. |
+| `!rivals [flag] [pg] [p]`, `!rivalsi [flag] [pg] <pos>` | `Rivals of <name>, all maps, by <order>`: the table of `!mapplayerrivals` with every map of the account added up. |
+| `!versus [flag] [pg] <p> [p2]`, `!versusi [flag] <pos> [pos2]` | `[ <p> vs <p2> - head to head ]` (p2 is the caller when left out; a text that is exactly the name of a player on the server or of an account is one player, else the first word is p and the rest p2; `!versusi` with three numbers: page, pos, pos2): the kills and damage of each against the other over all maps, the K/D, the maps, the points p won from p2 and lost to him with their difference, the last fight and who is ahead, then one line per map (`Per map by <order> - the numbers of <p> first`), the most fights first, in the columns of `!rivals`. Each side keeps its own entry of the other; of a map the larger count of kills and damage of the two is taken (one side may have dropped the other for `MaxRivals`), and p's points come from his own entry (from p2's, turned round, when p has none there). |
+| `!playermatchup [weapon] [flag] [pg] [p]`, `!playermatchupi [weapon] [flag] [pg] <pos>` (also `!playermatrix`, `!playermatrixi`) | The table of `!mapplayermatchup` over all maps; with a weapon - its exact name first in the text, or as before the end of the text (see `!wep` for the names; a single word that is exactly the name of a player on the server is the player) - that weapon of the account against every weapon it met, also the same one, in the columns of `!matchup <weapon>`. |
+| `!maprivals [map] [flag] [pg]` | `Rivalries on <map>, by <order> [Page p/P] (<n> pairs)`: the pairs of players of the map with the most fights: `Kills` and `Damage` of the first player - of the second, `Points` (won - lost by the first player), `Pts Delta` (their difference), the day of the last fight. When one side has no entry of the other any more (`MaxRivals`, a prune), its points are the other side's turned round. After the map the flags and the page may come in any order. A heavy list: it goes through every record of the map. |
+| `!mapmatchup [map] [weapon] [flag] [pg]` (also `!mapmatrix`) | The weapon duels of the map (all time, never pruned) in the tables of `!matchup` and `!matchup <weapon>`: `Weapon Matchups on <map>: Top Rivalries, by <order>` or `Matchups: <weapon> on <map>, by <order>`. A text that is exactly a weapon's name is the weapon on the map being played, unless a map is called so; a weapon may also come before the map, or be a part or a typo of a name. A number is the page. |
+| `!mapweapstats [map] [flag] [pg]` (also `!mapweapsstats`, `!mapwepstats`, `!mapwepsstats`) | `Weapons on <map>, by <order> [Page p/P] (<n>)`: every weapon used on the map in the columns of `!serverweapons`: `Kills` (the map's own count, all time), `Share` (of those kills), `Pick%` (the share of the picks of its group on the map: the primaries, or the secondaries), then from the players' records of the map `Shots`, `Hits`, `Acc%`, `HS%`, `DmgOut`, `Players` (who used it there) and `Time`; `Map totals` below: the kills, the deadliest weapon, the players with a record there, the most picked primary and secondary, the damage. A heavy list. |
+| `!mapwep <weapon> [map]` (also `!mapweapon`, `!mapweap`) | `Weapon: <weapon> on <map>`: the map's own kills with it and their share, its picks and their share of its group (by team in team modes), the weapon that killed it most there and the one it killed most (`Nemesis`, `Top Victim`, from the duels of the map); then what the players' records of the map hold of it (kills, deaths by it, players, damage, per kill and per hit, shots, hits, time, headshots, hits per kill) and `Best players with the <weapon> here`: the five with the most kills with it (then the most damage): `Kills`, `Deaths`, `K/D`, `Acc%`, `HS%`, `Damage`, `Time`. The weapon is the start of the text (a number or a name, a part or a typo of one), the rest the map. A heavy list; `!mapwep help` lists the weapons. |
+
+What belongs to the account as a whole is in no record of a map: the rank, the Rating, the ratings and the league, the tier, the season, the achievements and badges, the game modes, the protection days, the spectator time, the balance moves, the streak levels, the Mercy and Cheater medals and the Pointmatch bonus of `!spree`, and of `!rambo` all but the bow kills, the Rambo kills and the time with a bow.
+
+The kills and picks of a map in `!mapweapstats` and `!mapwep` are the map's own counters since it was first played (with `SharedMaps` those of every server of the database, as in `!mapstats`); everything else there comes from the players' records of the map, since 5.5 and for the last `MatrixPruneDays` days of play of each account.
+
+Every list has pages of `[Ranking] TopDisplayLinesCount` (15) rows: `/zs_next`, `/zs_prev`, `/zs_page <n>`, `/zs_first` and `/zs_end` go on with it in the order it was opened with; the lists also take the page as a number (before the player, or after it as before).
 
 ### !server
 
@@ -1081,11 +1187,11 @@ Header: `Server Activity: Week by Hour`. The data is the same player-second coun
 
 ### HUD and messages
 
-The HUD line is sent by `RefreshHud` once per second for every human when the text changed, and otherwise every `[HUD] RefreshSeconds` (3).
+The HUD line is sent by `RefreshHud` once per second for every human when the text changed, and otherwise every `[HUD] RefreshSeconds` (3). A note stays on it for `[HUD] EventSeconds` (2) from the second it first shows.
 
 | Output | What it means | When it is shown |
 | :--- | :--- | :--- |
-| `Rank: <r>/<N>  Points: <p>` | Position in the points ranking (0 when hidden) / accounts in it; current points. Event notes of the last second follow on the same line (at most 4). | when `[HUD] Enabled` is on, the account has `!hud` switched on and the player is not a spectator. New accounts start with the HUD off (on with `[HUD] DefaultOn = 1`). |
+| `Rank: <r>/<N>  Points: <p>` | Position in the points ranking (0 when hidden) / accounts in it; current points. Event notes follow on the same line, each for `EventSeconds` (at most 4: a new note pushes out the oldest one that was on the line already, a points note first, else the oldest points note not shown yet). | when `[HUD] Enabled` is on, the account has `!hud` switched on and the player is not a spectator. New accounts start with the HUD off (on with `[HUD] DefaultOn = 1`). |
 | `Not logged in - stats are not saved` | The account is password protected and the player is not logged in. | instead of the rank line |
 | `+<n> pts`, `+<n> pts (inactive victim)`, `-<n> pts` | Points of a counted kill for killer and victim; a kill or a capture that pays 0 points gives no note. | notes |
 | `-<n> pts selfkill`, `-<n> pts selfkill under fire`, `+<n> pts (selfkill of <name>)` | Selfkill points. | notes |
@@ -1093,7 +1199,7 @@ The HUD line is sent by `RefreshHud` once per second for every human when the te
 | `+<n> pts capture`, `+<n> pts team capture`, `-<n> pts enemy capture` | Capture points (CTF pool or fallback). | notes |
 | `KILLING SPREE!`, `RAMPAGE!`, `DOMINATING!`, `UNSTOPPABLE!`, `GODLIKE!` | Streak of 5, 10, 15, 20, 25. | notes |
 | `Double kill!`, `Triple kill!`, `Multi kill!` | Multi-kill levels 2-4 (higher levels have no note). | notes |
-| `FIRST BLOOD!`, `Long shot: <n> m`, `Shut down <name>'s spree`, `Dominating <name>`, `<name> is dominating you`, `Domination ended!`, `Revenge!`, `Flag carrier down`, `Finisher`, `Assist`, `Savior`, `Avenger` | The feat was counted. | notes |
+| `FIRST BLOOD!` (the first kill of a match), `ROUND FIRST BLOOD` (Survival: the first kill of a round after the first one), `Long shot: <n> m`, `Shut down <name>'s spree`, `Dominating <name>`, `<name> is dominating you`, `Domination ended!`, `Revenge!`, `Flag carrier down`, `Finisher`, `Assist`, `Savior`, `Avenger` | The feat was counted. | notes |
 | `Flag juggle`, `Held the flag under fire`, `Last man standing!`, `Last stand vs <n>`, `Clutch won!` | The feat was counted. | notes |
 | `Welcome <name>! Rank <r>/<N>, <p> points.` | Welcome after joining (to the player, or to everybody with `WelcomeBroadcast`). | `[Messages] WelcomeEnabled`, not for spectators or players not logged in |
 | `<name> unlocked "<achievement>"` / `Achievement unlocked: <achievement>` | New achievement, to everybody or only to the player. | `[Messages] AchievementBroadcast` decides |
@@ -1109,7 +1215,7 @@ Without an argument (library status):
 
 | Output | What it means |
 | :--- | :--- |
-| `[ZitroStats 5.2] <a> accounts, <m> maps, <o> online, read-only: <no/YES>` | Accounts, map records, humans online, whether saving is off. |
+| `[ZitroStats 5.5] <a> accounts, <m> maps, <o> online, read-only: <no/YES>` | Accounts, map records, humans online, whether saving is off. |
 | `journal gen <g>, <k> KB since the last snapshot, IO queue <q> KB, dropped events <d>` | Storage state; events dropped because the queue was full. |
 | `load: <message>` | Load problem or restore note, if any. |
 | `shared database: connected, <n> exchanges, <w> changes written, <r> read, last <s> s ago` | `[MySQL] Engine = mysql`: the exchange with the database of every server. `not answering (<why>), the changes wait` while it does not answer; `not reached yet (<why>), working from the files` after a start without it; `off until the next start - <why>` when nothing is exchanged until a restart (README, Troubleshooting). |
@@ -1157,7 +1263,7 @@ Admins only. Diagnostics, no player statistics.
 
 | Output | What it means |
 | :--- | :--- |
-| `[ZitroStats 5.2] engine timing since <date>` | Start of the measurement. |
+| `[ZitroStats 5.5] engine timing since <date>` | Start of the measurement. |
 | `events: <n>, avg <x> ms, max <y> ms, largest batch <b>, queued now <q>, dropped <d>` | Game events applied, time per event, queue size. |
 | `timers: <n> runs, avg <x> ms, max <y> ms` | Timer passes of the engine thread. |
 | `data: <a> accounts, <h> free slots, <m> maps, <s> archived seasons` | Data sizes. |
@@ -1217,7 +1323,7 @@ The first alias that matches wins; names are not case sensitive. "Lower is bette
 | 40 | stopit stop | StopIt | 12th kill of a chain. |
 | 41 | mercy | Mercy | 13th kill of a chain. |
 | 42 | cheater | Cheater | 14th and later kills of a chain. |
-| 43 | firstblood fb | FBlood | First bloods. |
+| 43 | firstblood fb | FBlood | First bloods: the first kill of a match. |
 | 44 | firstdmg firstdamage fd | FDmg | First damage of a match or round. |
 | 45 | laststand ls | LastStand | Last stands. |
 | 46 | clutches clutch | Clutches | Clutches won. |
@@ -1341,6 +1447,7 @@ The first alias that matches wins; names are not case sensitive. "Lower is bette
 | 164 | berserkkits berserkerkits | BerserkKits | Berserker kits picked up. |
 | 165 | predatorkits | PredatorKits | Predator kits picked up. |
 | 166 | flamerkits | FlamerKits | Flamer kits picked up. |
+| 167 | roundfirstblood rfb | RndFBlood | First bloods of Survival rounds: the first kill of a round, every round. |
 
 ### Weapon-based player metrics
 
@@ -1456,6 +1563,8 @@ The same names sort `!allweaponsby` and `!serverweaponsby`. With `!allweaponsby`
 | 28 | stayed retention | Stayed% | Share of the players who stayed after the map (0 without data). |
 | 29 | leftafter emptying | LeftAfter% | 100 - Stayed% (0 without data): the maps after which the server empties first. |
 | 30 | endplayers lastplayers | EndPlayers | Average players in the last tenth of a match. |
+| 31 | lastplayed played | LastPlayed | The last second the map was played with statistics on (newest first). |
+| 32 | lastloaded loaded | LastLoaded | The last time the map was started, with or without players (newest first). |
 
 ---
 
@@ -1621,10 +1730,10 @@ Common parts: accuracy = hits / max(shots, hits), or 0.2 without shots. K/D = ki
 **Free-for-all (DM, PM, RM) with Survival.** Rounds are tracked per player, not per team.
 
 - The humans who spawn once a round has ended take part in the next one; a round needs at least two of them and `SurvivalOn`. A player who leaves before the round ends gets nothing for it.
-- It ends once at most one of the players who took part is still alive: that player wins the round (`Rounds Won`, `Last Stand`) and every other human who took part loses it (`Rounds Lost`).
+- It ends once at most one of the players who took part is still alive: that player wins the round (`Rounds Won`, and `Last Stand` with at least `[Mechanics] LastStandMinPlayers` (3) players in the round: one against one is no last stand) and every other human who took part loses it (`Rounds Lost`).
 - When the last two of them die together, or a bot ends up the only one left standing, the round still ends and everybody who took part gets a loss, but nobody wins it.
 
-**Reset.** First blood, first damage and last stands are reset for the next round, team and free-for-all alike. A round the map change cuts short counts for nobody; one decided in the last tick of the map still counts.
+**Reset.** The first blood of the round, first damage and last stands are reset for the next round, team and free-for-all alike; the first blood of the match is given once a match. A round the map change cuts short counts for nobody; one decided in the last tick of the map still counts.
 
 ### MMR (Heroes of the Storm style)
 
@@ -1697,7 +1806,7 @@ Written every `[Export] ExportIntervalMinutes` (5) and on `/zs_export`, when `JS
 | :--- | :--- |
 | Top level | `format` (2), `generator`, `generated_at`, `version`, `total_players` (accounts), `total_maps` |
 | `server` | `online` (humans on the server), `map`, `mode` (DM, PM, TM, CTF, RM, INF, HTF), `peak_online`, `peak_online_date`, `total_matches` (counted matches), `rating_system` (`elo`, `mmr`, `glicko2` or `openskill`), `season` (running season id), `season_end` |
-| `players[]` (best `JSONExportTopCount` (50) of the points ranking) | `rank`, `id`, `name`, `tier` (league or tier), `points`, `rating` (Rating index for the current mode), `kdr`, `kills`, `deaths`, `selfkills`, `assists`, `headshots` (head hits, not kills), `accuracy_pct`, `headshot_pct` (head hits / hits), `playtime_sec`, `max_killstreak`, `damage_dealt`, `damage_received`, `damage_ratio`, `first_bloods`, `first_damage`, `wins`, `loses`, `draws`, `caps`, `season_points`, `achievements` (count), `registered` (password set), `last_seen` |
+| `players[]` (best `JSONExportTopCount` (50) of the points ranking) | `rank`, `id`, `name`, `tier` (league or tier), `points`, `rating` (Rating index for the current mode), `kdr`, `kills`, `deaths`, `selfkills`, `assists`, `headshots` (head hits, not kills), `accuracy_pct`, `headshot_pct` (head hits / hits), `playtime_sec`, `max_killstreak`, `damage_dealt`, `damage_received`, `damage_ratio`, `first_bloods` (the first kill of a match), `round_first_bloods` (of a Survival round), `first_damage`, `wins`, `loses`, `draws`, `caps`, `season_points`, `achievements` (count), `registered` (password set), `last_seen` |
 | `players[]` distances | `longest_kill_px`, `longest_barret_px`, `avg_kill_dist_px` (whole pixels = meters x 14), `longest_kill_m`, `longest_barrett_m`, `avg_kill_dist_m` |
 | `maps[]` (all maps, most played time first) | `id`, `map`, `plays` (counted matches), `kills`, `selfkills`, `playtime_sec` (seconds with statistics on), `caps`, `alpha_wins`, `bravo_wins`, `draws`, `avg_match_sec` (as `Avg Match`, 0 before the first measured match), `avg_players` (as `Avg Humans`), `fastest_cap_sec`, `votes_started`, `votes_won`, `voted_in`, `stayed_pct` (`null` before the first measured map end), `players_by_time` (ten numbers as `Over the match`, `null` for a tenth without data), `last_played` |
 | `weapons[]` (weapons with kills, shots, hits or picks) | `name`, `kills`, `deaths`, `shots`, `hits`, `headshots` (head hits), `accuracy_pct`, `headshot_pct`, `damage`, `time_sec`, `damage_per_min`, `hits_per_kill`, `longest_kill_m`, `avg_kill_dist_m`, `avg_ttk_sec`, `picks`, `picks_alpha`, `picks_bravo`, `picks_charlie`, `picks_delta`, `vest_kills` (the same totals as `!topweapons`) |
@@ -1711,7 +1820,7 @@ Written with the same timer when `FullExportEnabled` (0), to `FullExportPath`. T
 | :--- | :--- |
 | Identity and ranking | `id`, `name`, `rank` (0 if hidden), `tier`, `points`, `rating`, `league`, `registered`, `first_seen` (account creation), `last_seen` |
 | Skill values | `skill_ffa`, `skill_team`, `skill_ctf`: value of `RankingSystem` for each family: Glicko-2 conservative value, OpenSkill ordinal, or MMR (with `mmr` and `elo`); start values when unrated. `mmr_ffa`, `mmr_team`, `mmr_ctf`: MMR of each family (the start value when unrated). |
-| Combat | `kills`, `deaths`, `assists`, `selfkills`, `teamkills`, `shots` (max of shots and hits), `hits`, `hits_head`, `hits_body`, `hits_legs`, `damage_dealt`, `damage_received`, `best_streak`, `first_bloods`, `multi_kills` (only the 4th-kill medal), `knife_kills` (Combat Knife slot), `grenade_kills` (frag + cluster) |
+| Combat | `kills`, `deaths`, `assists`, `selfkills`, `teamkills`, `shots` (max of shots and hits), `hits`, `hits_head`, `hits_body`, `hits_legs`, `damage_dealt`, `damage_received`, `best_streak`, `first_bloods`, `round_first_bloods`, `multi_kills` (only the 4th-kill medal), `knife_kills` (Combat Knife slot), `grenade_kills` (frag + cluster) |
 | Distance and timing | `longest_kill_m`, `avg_kill_dist_m`, `avg_ttk_sec`, `longest_life_sec`, `traveled_km`, `best_life_distance_m` |
 | Time and activity | `playtime_sec`, `alive_sec`, `spectator_sec`, `days_played`, `protection_days` |
 | Matches and objectives | `wins`, `loses`, `draws`, `rounds_won`, `rounds_lost`, `caps`, `returns`, `grabs`, `flag_hold_sec`, `fastest_cap_sec` |
@@ -1736,9 +1845,9 @@ Written with the same timer when `FullExportEnabled` (0), to `FullExportPath`. T
 
 ### MySQL
 
-`[MySQL] Engine = mirror`: every `MirrorIntervalSeconds` (60) - the players on the server always, the others when they played since the last run, everybody once an hour: table `zs_players` (`profile_id`, `name`, `points`, `rank_pos`, `rating`, `kills`, `deaths`, `assists`, `headshots`, `shots`, `hits`, `wins`, `loses`, `caps`, `playtime_sec`, `last_seen`, and with `FullJson = 1` the players.json object in `data`), `zs_maps` (`map_id`, `name`, `plays`, `kills`, `caps`, `playtime_sec`, `last_played`) and `zs_server` (`accounts`, `peak_online`, `total_matches`). Every row carries `server_id` and `updated_at`. The Shared switches (see the README) fill more columns: `zs_players.steam_id` (the SteamID, or for an account without Steam `H:` and a hash of the HWID of its computer), and for the accounts that played since the last run `shared_data` (the complete record) and `shared_at` (`SharedProfiles`, `SharedRankings`); `zs_maps.shared_data` and `shared_at` for the maps played since the last run (`SharedMaps`); `zs_server.shared_data` (the server record), `shared_sum` (every account added up) and `shared_at` (`SharedWeapons`, `SharedServer`). After every pass the mirror reads what the other servers wrote since the last time, and every quarter of an hour it notices the rows they deleted.
+`[MySQL] Engine = mirror`: every `MirrorIntervalSeconds` (60) - the players on the server always, the others when they played since the last run, everybody once an hour: table `zs_players` (`profile_id`, `name`, `points`, `rank_pos`, `rating`, `kills`, `deaths`, `assists`, `headshots`, `shots`, `hits`, `wins`, `loses`, `caps`, `playtime_sec`, `last_seen`, and with `FullJson = 1` the players.json object in `data`), `zs_maps` (`map_id`, `name`, `plays`, `kills`, `caps`, `playtime_sec`, `last_played`) and `zs_server` (`accounts`, `peak_online`, `total_matches`). Every row carries `server_id` and `updated_at`. The Shared switches (see the README) fill more columns: `zs_players.steam_id` (the SteamID, or for an account without Steam `H:` and a hash of the HWID of its computer), and for the accounts that played since the last run `shared_data` (the complete record) and `shared_at` (`SharedProfiles`, `SharedRankings`); `zs_maps.shared_data` and `shared_at` for the maps played since the last run (`SharedMaps`); `zs_server.shared_data` (the server record), `shared_sum` (every account added up) and `shared_at` (`SharedWeapons`, `SharedServer`). After every pass the mirror reads what the other servers wrote since the last time, and every quarter of an hour it notices the rows they deleted. With `[Matrix] Enabled = 1` a flat table `zs_player_map_stats` is written the same way, one row per server, account and map: `server_id`, `account_id`, `map_name`, `matches`, `wins`, `losses`, `draws`, `rounds_won`, `rounds_lost`, `kills`, `deaths`, `assists`, `selfkills`, `teamkills`, `points`, `caps`, `shots`, `hits`, `headshots`, `damage_dealt`, `damage_received`, `playtime_sec`, `first_played`, `last_played`, `updated_at` - for a website, not shared between servers; rows pruned, reset or merged away here are deleted from it at the next full pass.
 
-`[MySQL] Engine = mysql`: one database for every server (see the README). `zs_db_accounts` holds every account once: `id`, `steam`, `hwid_key` (for an account without Steam a hash of the HWID of its computer, which finds the account of that computer), `name`, `points`, `kills`, `deaths`, `playtime_sec`, `last_seen`, the complete record in `data` (binary), and `version`, `seq`, `deleted`, `merged_into`, `updated_by` (the `ServerID` that wrote it last), `updated_at`. `zs_db_maps` (`name`, `id`, `plays`, `kills`, `playtime_sec`, `data`), `zs_db_server` (the server record), `zs_db_seasons` (the archived seasons), `zs_db_meta` (the change counter, the next account and map numbers, the servers that joined) and `zs_db_jobs` (which server did the daily balance and the season change).
+`[MySQL] Engine = mysql`: one database for every server (see the README). `zs_db_accounts` holds every account once: `id`, `steam`, `hwid_key` (for an account without Steam a hash of the HWID of its computer, which finds the account of that computer), `name`, `points`, `kills`, `deaths`, `playtime_sec`, `last_seen`, the complete record in `data` (binary), and `version`, `seq`, `deleted`, `merged_into`, `updated_by` (the `ServerID` that wrote it last), `updated_at`. `zs_db_maps` (`name`, `id`, `plays`, `kills`, `playtime_sec`, `data`), `zs_db_server` (the server record), `zs_db_seasons` (the archived seasons), `zs_db_meta` (the change counter, the next account and map numbers, the servers that joined) and `zs_db_jobs` (which server did the daily balance and the season change). The player-on-map records of `[Matrix]` go into `zs_db_player_maps`, one row per account id and map name (`account_id`, `map_name`, `kills`, `deaths`, `playtime_sec`, `last_played` for a website, the complete record in `data`, `version`, `seq`, `deleted`, `updated_by`, `updated_at`), merged three-way like the accounts and maps; a record removed here (a prune, a reset, a merged-away account) keeps its row with `deleted = 1`.
 
 What the Shared switches change in the headers: a profile with numbers of other servers says `[<n> servers]` after the name (n counts this server too); the player rankings say `of All Servers` (`Top Ranking of All Servers [Page p/P]`, `Top by K/D of All Servers ...`, `Top Today of All Servers ...`); the map lists `Top Maps of All Servers`, `!mapstats` `[ Map Statistics: <map> - <n> servers ]` (`- other servers` for a map played only there); the weapons `All Weapons Breakdown: all servers`, `Weapon: <weapon> - all servers`, `Top Weapons by <metrics> - all servers`; the server `Server Statistics & Activity Analytics - all servers` and `Server Activity: Week by Hour - all servers`.
 
@@ -1789,7 +1898,7 @@ What the Shared switches change in the headers: a profile with numbers of other 
 | 38 | 1 when the account has a password |
 | 39 | MMR, family of the current mode (start value when unrated) |
 
-Other functions: `ZS_Is_Ready` (1 after loading), `ZS_Get_Api_Version` (14), `ZS_API_Get_Player_Name(Slot)`, `ZS_API_Get_Player_Rank(Slot)` (points ranking position), `ZS_API_Get_Player_HUD(Slot)` (1 when `!hud` is on), `ZS_API_Get_Profile_Count` (accounts), `ZS_API_Get_Top_Player(Rank)` (name at that points ranking position), `ZS_API_Top_Player_Copy(Rank, Buf, Size)` (the same with the SteamID, for another library), `ZS_API_Get_Server_Peak` (online record).
+Other functions: `ZS_Is_Ready` (1 after loading), `ZS_Get_Api_Version` (15), `ZS_API_Get_Player_Name(Slot)`, `ZS_API_Get_Player_Rank(Slot)` (points ranking position), `ZS_API_Get_Player_HUD(Slot)` (1 when `!hud` is on), `ZS_API_Get_Profile_Count` (accounts), `ZS_API_Get_Top_Player(Rank)` (name at that points ranking position), `ZS_API_Top_Player_Copy(Rank, Buf, Size)` (the same with the SteamID, for another library), `ZS_API_Get_Server_Peak` (online record).
 
 ---
 

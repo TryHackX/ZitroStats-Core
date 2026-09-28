@@ -8,7 +8,8 @@ unit zs_commands;
   /zs_end page through them (also without the underscore). The plain /next and the like are left
   to other scripts.
 
-  Player arguments: nothing = yourself, a name (exact, then partial), #id = account number.
+  Player arguments: nothing = yourself, a name or a part of it (the players on the server first,
+  the accounts only when none of them matches), #id = account number.
   Commands ending in "i" take a ranking position instead. }
 
 {$mode objfpc}{$H+}
@@ -71,7 +72,8 @@ function TeamFromText(const Text: AnsiString): LongInt;
 implementation
 
 uses
-  zs_fields, zs_shared, zs_maps;
+  zs_fight,
+  zs_fields, zs_shared, zs_maps, zs_matrix;
 
 type
   PSlotExtra = ^TSlotExtra;
@@ -101,9 +103,19 @@ const
   QK_MAPS = 13;
   QK_ALLMAPS = 14;
   QK_SEARCHMAP = 15;
+  { the lists of the per-map data (zs_cmd_matrix.inc) }
+  QK_PLAYERMAPS = 16;
+  QK_RIVALS = 17;
+  QK_MAPRIVALS = 18;
+  QK_VERSUS = 19;
+  QK_PMATCHUP = 20;
+  QK_MAPMATCHUP = 21;
+  QK_MAPWEAPONS = 22;
 
-  PLAYER_COMMANDS = ' zitro commands help cmds reginfo info credits autor tworca hud contact ' +
+  { !commands and !cmds belong to the owner's Basic script, not to ZitroStats }
+  PLAYER_COMMANDS = ' zitro help reginfo info credits autor tworca hud contact ' +
     'stats statsi otherstats otherstatsi status statusi rank ranki ranknum session sessioni today ' +
+    'lastfight ' +
     'top topp topi topo toponline topme topid topby topskill toprating topseason topday topweek topmonth ' +
     'zs_search zssearch mapstats topmaps topmapsp topmapsi topmapsby server serverstats activity ' +
     'allweapons weapons allweaponsi weaponsi allweaponsby weaponsby allweaponsbyi weaponsbyi ' +
@@ -113,7 +125,15 @@ const
     'topweapons topweps topweaponsby topwepsby rambo ramboi spree spreei pointmatch pm ' +
     'achievements ach badges achievementsi achi badgesi achlist achievementslist achlisti achievementslisti seasons ' +
     'heatmap heat zs_next zs_prev zs_page zs_first zs_end bal teams switch join ' +
-    'v vote nextmap lastmap votelast votelastmap randommap map votemap maps allmaps searchmap ';
+    'v vote nextmap lastmap votelast votelastmap randommap map votemap maps allmaps searchmap ' +
+    'mapplayerstats mapplayerotherstats mapplayerweapstats mapplayerrivals mapplayermatchup playerheatmap ' +
+    'playermaps rivals versus playermatchup maprivals mapmatchup ' +
+    'mapplayerstatsi mapplayerotherstatsi mapplayerweapstatsi mapplayerrivalsi mapplayermatchupi playerheatmapi ' +
+    'playermapsi rivalsi versusi playermatchupi playermatrix playermatrixi mapplayermatrix mapplayermatrixi mapmatrix ' +
+    'mapweapstats mapweapsstats mapwep mapweapon ' +
+    { weap for wep and wep for weap, as !weap is !wep (NormalizeCommand) }
+    'serverweaps srvweaps serverweapsby srvweapsby serverweap srvweap topweaps topweapsby mapweap ' +
+    'mapwepstats mapwepsstats mapplayerwepstats mapplayerwepstatsi ';
   IDENTITY_COMMANDS = ' register login changepass setemail verifyemail forgotpass resetpass account removemypass ';
   { names of Soldat's own server commands that ZitroStats also knows (as chat commands); /votemap
     goes to the map vote only while it is switched on (ZS_Command) }
@@ -676,39 +696,24 @@ begin
   Result := Kind * 1000 + Min(999, Length(Low) - m);
 end;
 
-{ #id, then the exact name (a player on the server first, whatever older accounts carry the
-  same name), then the closest name (NameMatchRank). A player on the server wins a tie; an
-  account that is not on the server wins only with a better kind of match, and between those
-  the more recently seen one. Going through every account counts toward the server-wide list
-  limit for a player (Slot > 0); a player on the server is found without it. }
+{ #id, then the players on the server: the closest name among them (NameMatchRank - the whole
+  name, its beginning, the beginning of a word, any part, then the shorter name; the first slot
+  of equal ones). Only when nobody on the server matches, the accounts: the exact name (the one
+  seen last of several), then the closest name, and between equal ones the one seen last. Going
+  through every account counts toward the server-wide list limit for a player (Slot > 0); a
+  player on the server is found without it. }
 function FindProfileText(E: TZSEngine; const Arg: AnsiString; Slot: LongInt = 0): LongInt;
 var
   C: TIntArray;
   k, S, R, BestKind, BestLen, BestR: LongInt;
   Low: AnsiString;
-  BestOnline, Better: Boolean;
 begin
   Result := -1;
   if Arg = '' then
     Exit;
   if Arg[1] = '#' then
     Exit(E.DB.IndexOfId(StrToIntDef(Copy(Arg, 2, MaxInt), 0)));
-  for S := 1 to MAX_PLAYERS do
-    if E.Live[S].Active and E.Live[S].Human and SameText(E.Live[S].Name, Arg) then
-    begin
-      k := E.Identity.ProfileIndex(S);
-      if E.DB.Valid(k) then
-        Exit(k);
-    end;
-  C := E.DB.IndexesOfName(Arg);
-  for k := 0 to High(C) do
-    if E.DB.Valid(C[k]) and MoreRecent(E, C[k], Result) then
-      Result := C[k];
-  if Result >= 0 then
-    Exit;
   Low := LowerCase(Arg);
-  BestKind := MaxInt;
-  BestLen := MaxInt;
   BestR := MaxInt;
   for S := 1 to MAX_PLAYERS do
     if E.Live[S].Active and E.Live[S].Human then
@@ -721,37 +726,35 @@ begin
       begin
         Result := k;
         BestR := R;
-        BestKind := R div 1000;
-        BestLen := R mod 1000;
       end;
     end;
-  BestOnline := Result >= 0;
-  { the beginning of the name of a player on the server is what people mean }
-  if BestOnline and (BestKind <= 1) then
+  if Result >= 0 then
+    Exit;
+  C := E.DB.IndexesOfName(Arg);
+  for k := 0 to High(C) do
+    if E.DB.Valid(C[k]) and MoreRecent(E, C[k], Result) then
+      Result := C[k];
+  if Result >= 0 then
     Exit;
   if not HeavyBudget(E, Slot) then
   begin
-    if not BestOnline then
-      FindRefused := True;
+    FindRefused := True;
     Exit;
   end;
+  BestKind := MaxInt;
+  BestLen := MaxInt;
   for k := 0 to E.DB.ProfileCount - 1 do
     if E.DB.Valid(k) then
     begin
       R := NameMatchRank(E.DB.Profiles[k]^.ActiveName, Low);
       if R < 0 then
         Continue;
-      if BestOnline then
-        Better := R div 1000 < BestKind
-      else
-        Better := (R div 1000 < BestKind) or ((R div 1000 = BestKind) and ((R mod 1000 < BestLen) or
-          ((R mod 1000 = BestLen) and MoreRecent(E, k, Result))));
-      if Better then
+      if (R div 1000 < BestKind) or ((R div 1000 = BestKind) and ((R mod 1000 < BestLen) or
+         ((R mod 1000 = BestLen) and MoreRecent(E, k, Result)))) then
       begin
         Result := k;
         BestKind := R div 1000;
         BestLen := R mod 1000;
-        BestOnline := False;
       end;
     end;
 end;
@@ -1224,9 +1227,11 @@ end;
 
 {$I zs_cmd_mapvote.inc}
 {$I zs_cmd_profile.inc}
+{$I zs_cmd_fight.inc}
 {$I zs_cmd_lists.inc}
 {$I zs_cmd_maps.inc}
 {$I zs_cmd_weapons.inc}
+{$I zs_cmd_matrix.inc}
 {$I zs_cmd_server.inc}
 {$I zs_cmd_balance.inc}
 
@@ -1250,6 +1255,8 @@ begin
     QK_MAPS: ListMapsList(E, Slot, Page, '');
     QK_ALLMAPS: ListAllMaps(E, Slot, Query, Page);
     QK_SEARCHMAP: ListSearchMaps(E, Slot, Query, Page);
+    QK_PLAYERMAPS, QK_RIVALS, QK_MAPRIVALS, QK_VERSUS, QK_PMATCHUP, QK_MAPMATCHUP, QK_MAPWEAPONS:
+      MatrixPage(E, Slot, Kind, Query, Page);
   end;
 end;
 
@@ -1292,8 +1299,8 @@ begin
     else
       NewPage := Max(1, St^.Pages);
   end;
-  if (St^.LastQueryKind in [QK_TOPBY, QK_SEARCH, QK_SEARCH_ADMIN, QK_TOPWEAPONS, QK_TOPPERIOD, QK_TOPMAPSBY]) and
-     not HeavyBudget(E, Slot) then
+  if (St^.LastQueryKind in [QK_TOPBY, QK_SEARCH, QK_SEARCH_ADMIN, QK_TOPWEAPONS, QK_TOPPERIOD, QK_TOPMAPSBY,
+     QK_MAPRIVALS, QK_MAPWEAPONS]) and not HeavyBudget(E, Slot) then
     Exit;
   RunQuery(E, Slot, St^.LastQueryKind, St^.LastQuery, NewPage);
 end;
@@ -1356,7 +1363,7 @@ begin
   else
     Arg := '';
 
-  if (Cmd = 'zitro') or (Cmd = 'commands') or (Cmd = 'help') or (Cmd = 'cmds') or (Cmd = 'reginfo') or
+  if (Cmd = 'zitro') or (Cmd = 'help') or (Cmd = 'reginfo') or
      (Cmd = 'info') or (Cmd = 'credits') or (Cmd = 'autor') or (Cmd = 'tworca') then
     CmdHelp(E, Slot, Admin)
   else if Cmd = 'contact' then
@@ -1381,6 +1388,9 @@ begin
   end
   else if Cmd = 'hud' then
     CmdHud(E, Slot)
+  { the caller's last deaths (zs_cmd_fight.inc) }
+  else if Cmd = 'lastfight' then
+    CmdLastFight(E, Slot, Rest)
 
   { profiles }
   else if Cmd = 'stats' then
@@ -1570,6 +1580,42 @@ begin
   else if (Cmd = 'heatmap') or (Cmd = 'heat') then
     CmdHeatmap(E, Slot, Rest)
 
+  { what the players did on the maps ([Matrix], zs_cmd_matrix.inc): a player on one map, a player
+    over all his maps, one map with all its players; the "i" forms take a ranking position, matrix is
+    matchup }
+  else if (Cmd = 'mapplayerstats') or (Cmd = 'mapplayerstatsi') then
+    CmdMapPlayerStats(E, Slot, Rest, Cmd = 'mapplayerstatsi')
+  else if (Cmd = 'mapplayerotherstats') or (Cmd = 'mapplayerotherstatsi') then
+    CmdMapPlayerOtherStats(E, Slot, Rest, Cmd = 'mapplayerotherstatsi')
+  else if (Cmd = 'mapplayerweapstats') or (Cmd = 'mapplayerweapstatsi') or (Cmd = 'mapplayerwepstats') or
+          (Cmd = 'mapplayerwepstatsi') then
+    CmdMapPlayerWeapStats(E, Slot, Rest, (Cmd = 'mapplayerweapstatsi') or (Cmd = 'mapplayerwepstatsi'))
+  else if (Cmd = 'mapplayerrivals') or (Cmd = 'mapplayerrivalsi') then
+    CmdMapPlayerRivals(E, Slot, Rest, Cmd = 'mapplayerrivalsi')
+  else if (Cmd = 'mapplayermatchup') or (Cmd = 'mapplayermatrix') or (Cmd = 'mapplayermatchupi') or
+          (Cmd = 'mapplayermatrixi') then
+    CmdMapPlayerMatchup(E, Slot, Rest, (Cmd = 'mapplayermatchupi') or (Cmd = 'mapplayermatrixi'))
+  else if (Cmd = 'playerheatmap') or (Cmd = 'playerheatmapi') then
+    CmdPlayerHeatmap(E, Slot, Rest, Cmd = 'playerheatmapi')
+  else if (Cmd = 'playermaps') or (Cmd = 'playermapsi') then
+    CmdPlayerMaps(E, Slot, Rest, Cmd = 'playermapsi')
+  else if (Cmd = 'rivals') or (Cmd = 'rivalsi') then
+    CmdRivals(E, Slot, Rest, Cmd = 'rivalsi')
+  else if (Cmd = 'versus') or (Cmd = 'versusi') then
+    CmdVersus(E, Slot, Rest, Cmd = 'versusi')
+  else if (Cmd = 'playermatchup') or (Cmd = 'playermatrix') or (Cmd = 'playermatchupi') or (Cmd = 'playermatrixi') then
+    CmdPlayerMatchup(E, Slot, Rest, (Cmd = 'playermatchupi') or (Cmd = 'playermatrixi'))
+  { the pairs and the weapons of a map go through every record of it: a list limit once the map is
+    known }
+  else if Cmd = 'maprivals' then
+    CmdMapRivals(E, Slot, Rest, Admin)
+  else if (Cmd = 'mapmatchup') or (Cmd = 'mapmatrix') then
+    CmdMapMatchup(E, Slot, Rest)
+  else if (Cmd = 'mapweapstats') or (Cmd = 'mapweapsstats') or (Cmd = 'mapwepstats') or (Cmd = 'mapwepsstats') then
+    CmdMapWeapStats(E, Slot, Rest, Admin)
+  else if (Cmd = 'mapwep') or (Cmd = 'mapweapon') or (Cmd = 'mapweap') then
+    CmdMapWeapon(E, Slot, Rest, Admin)
+
   { the map vote (zs_cmd_mapvote.inc) }
   else if IsMapVoteCommand(Cmd) then
     CmdMapVote(E, Slot, Cmd, Rest, Source, Admin)
@@ -1589,12 +1635,14 @@ begin
   else if (Cmd = 'wepi') or (Cmd = 'weaponi') then
     CmdWeapon(E, Slot, Rest, True)
   { the same two views for the whole server: they read every account, so they are heavy }
-  else if (Cmd = 'serverweapons') or (Cmd = 'serverweps') or (Cmd = 'srvweapons') or (Cmd = 'srvweps') then
+  else if (Cmd = 'serverweapons') or (Cmd = 'serverweps') or (Cmd = 'srvweapons') or (Cmd = 'srvweps') or
+          (Cmd = 'serverweaps') or (Cmd = 'srvweaps') then
   begin
     if HeavyAllowed(E, Slot, Admin) then
       CmdServerWeapons(E, Slot);
   end
-  else if (Cmd = 'serverweaponsby') or (Cmd = 'serverwepsby') or (Cmd = 'srvweaponsby') or (Cmd = 'srvwepsby') then
+  else if (Cmd = 'serverweaponsby') or (Cmd = 'serverwepsby') or (Cmd = 'srvweaponsby') or (Cmd = 'srvwepsby') or
+          (Cmd = 'serverweapsby') or (Cmd = 'srvweapsby') then
   begin
     { the help and a text without a metric cost nothing; only a real table reads every account }
     if (Rest = '') or SameText(Rest, 'help') then
@@ -1602,7 +1650,8 @@ begin
     else if not HasWeaponMetric(Rest, False) or HeavyAllowed(E, Slot, Admin) then
       CmdServerWeaponsBy(E, Slot, Rest);
   end
-  else if (Cmd = 'serverwep') or (Cmd = 'serverweapon') or (Cmd = 'srvwep') then
+  else if (Cmd = 'serverwep') or (Cmd = 'serverweapon') or (Cmd = 'srvwep') or (Cmd = 'serverweap') or
+          (Cmd = 'srvweap') then
   begin
     { the help and an unknown weapon cost nothing; only a real lookup reads every account }
     if (Rest = '') or SameText(Rest, 'help') or (WepSlot(ResolveWeapon(Rest)) < 0) then
@@ -1622,9 +1671,9 @@ begin
     end;
     CmdMatchups(E, Slot, Rest, N);
   end
-  else if (Cmd = 'topweapons') or (Cmd = 'topweps') then
+  else if (Cmd = 'topweapons') or (Cmd = 'topweps') or (Cmd = 'topweaps') then
     CmdTopWeapons(E, Slot, Rest, Admin)
-  else if (Cmd = 'topweaponsby') or (Cmd = 'topwepsby') then
+  else if (Cmd = 'topweaponsby') or (Cmd = 'topwepsby') or (Cmd = 'topweapsby') then
   begin
     if (Rest = '') or SameText(Rest, 'help') then
       TopWeaponsByHelp(E, Slot)

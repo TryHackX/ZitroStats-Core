@@ -32,7 +32,7 @@ function MirrorRecordDue(Full, Active: Boolean; LastPlayed, Since: TDateTime): B
 implementation
 
 uses
-  base64, md5, mysqlwire, zs_fields, zs_service, zs_crash, zs_export, zs_shared;
+  base64, md5, mysqlwire, zs_fields, zs_service, zs_crash, zs_export, zs_shared, zs_matrix;
 
 const
   ERROR_REPEAT_MS = 10 * 60 * 1000;
@@ -80,6 +80,32 @@ const
     'ON DUPLICATE KEY UPDATE accounts = VALUES(accounts), peak_online = VALUES(peak_online), ' +
     'total_matches = VALUES(total_matches), updated_at = VALUES(updated_at)';
 
+  { [Matrix]: what every account did on every map of this server (zs_matrix), the main counters of
+    each record, for websites }
+  PM_COLS: array[0..24] of AnsiString = (
+    'server_id INT NOT NULL', 'account_id INT NOT NULL', 'map_name VARCHAR(64) NOT NULL',
+    'matches INT NOT NULL DEFAULT 0', 'wins INT NOT NULL DEFAULT 0', 'losses INT NOT NULL DEFAULT 0',
+    'draws INT NOT NULL DEFAULT 0', 'rounds_won INT NOT NULL DEFAULT 0', 'rounds_lost INT NOT NULL DEFAULT 0',
+    'kills INT NOT NULL DEFAULT 0', 'deaths INT NOT NULL DEFAULT 0', 'assists INT NOT NULL DEFAULT 0',
+    'selfkills INT NOT NULL DEFAULT 0', 'teamkills INT NOT NULL DEFAULT 0', 'points INT NOT NULL DEFAULT 0',
+    'caps INT NOT NULL DEFAULT 0', 'shots INT NOT NULL DEFAULT 0', 'hits INT NOT NULL DEFAULT 0',
+    'headshots INT NOT NULL DEFAULT 0', 'damage_dealt DOUBLE NOT NULL DEFAULT 0',
+    'damage_received DOUBLE NOT NULL DEFAULT 0', 'playtime_sec BIGINT NOT NULL DEFAULT 0',
+    'first_played DATETIME NULL', 'last_played DATETIME NULL', 'updated_at DATETIME NULL');
+  PM_KEYS = 'PRIMARY KEY (server_id, account_id, map_name), KEY idx_map (server_id, map_name)';
+  SQL_PM_COLS =
+    'server_id, account_id, map_name, matches, wins, losses, draws, rounds_won, rounds_lost, kills, deaths, ' +
+    'assists, selfkills, teamkills, points, caps, shots, hits, headshots, damage_dealt, damage_received, ' +
+    'playtime_sec, first_played, last_played, updated_at';
+  SQL_PM_TAIL =
+    'ON DUPLICATE KEY UPDATE matches = VALUES(matches), wins = VALUES(wins), losses = VALUES(losses), ' +
+    'draws = VALUES(draws), rounds_won = VALUES(rounds_won), rounds_lost = VALUES(rounds_lost), ' +
+    'kills = VALUES(kills), deaths = VALUES(deaths), assists = VALUES(assists), selfkills = VALUES(selfkills), ' +
+    'teamkills = VALUES(teamkills), points = VALUES(points), caps = VALUES(caps), shots = VALUES(shots), ' +
+    'hits = VALUES(hits), headshots = VALUES(headshots), damage_dealt = VALUES(damage_dealt), ' +
+    'damage_received = VALUES(damage_received), playtime_sec = VALUES(playtime_sec), ' +
+    'first_played = VALUES(first_played), last_played = VALUES(last_played), updated_at = VALUES(updated_at)';
+
 type
   TMirrorPlayer = record
     ProfileId, Points, RankPos, Kills, Deaths, Assists, Headshots, Shots, Hits, Wins, Loses, Caps: LongInt;
@@ -100,9 +126,21 @@ type
     LastPlayed: TDateTime;
   end;
 
+  { one player-on-map record ([Matrix]) }
+  TMirrorPM = record
+    AccountId, Matches, Wins, Losses, Draws, RoundsWon, RoundsLost, Kills, Deaths, Assists: LongInt;
+    Selfkills, Teamkills, Points, Caps, Shots, Hits, Headshots: LongInt;
+    MapName: AnsiString;
+    DamageDealt, DamageReceived: Double;
+    PlaySeconds: Int64;
+    FirstPlayed, LastPlayed: TDateTime;
+  end;
+
   TMirrorBatch = record
     Players: array of TMirrorPlayer;
     Maps: array of TMirrorMap;
+    PlayerMaps: array of TMirrorPM;
+    SendPM: Boolean;        { [Matrix] Enabled: the table zs_player_map_stats is written }
     Accounts, PeakOnline: LongInt;
     TotalMatches: Int64;
     Stamp: TDateTime;
@@ -144,6 +182,7 @@ type
     FHost, FDatabase, FUser, FPassword: AnsiString;
     FPort, FServerId, FCodepage: LongInt;
     FConn: TMyConnection;
+    FWritePM: Boolean;     { [Matrix] Enabled: the table of the player-on-map records }
     { what is read from the other servers (zs_shared) }
     FReadPlayers, FReadMaps, FReadServer: Boolean;
     FStart: LongInt;
@@ -179,6 +218,11 @@ var
   Mirror: TMirrorThread = nil;
   LastRunMs: Int64;
   LastFullMs: Int64;
+  { The whole seconds of the newest updated_at a pass wrote: every pass writes a later one. A whole
+    pass deletes the rows older than its own, and DATETIME keeps whole seconds - the first pass of
+    a copy started again (a reload of settings.ini) could fall into the second of the pass before
+    it and keep a row that is gone. Only one copy runs at a time, the next after the last stopped. }
+  LastStampSec: Int64 = 0;
 
 { ---------------- what the other servers wrote ---------------- }
 
@@ -257,6 +301,7 @@ begin
   FReadPlayers := E.Cfg.MySQLShareProfiles or E.Cfg.MySQLShareRankings;
   FReadMaps := E.Cfg.MySQLShareMaps;
   FReadServer := E.Cfg.MySQLShareWeapons or E.Cfg.MySQLShareServer;
+  FWritePM := E.Cfg.MatrixEnabled;
   FStart := E.Cfg.StartingPoints;
   FRawPlayers := NewRawList;
   FRawMaps := NewRawList;
@@ -326,6 +371,8 @@ begin
   MyPrepareTable(FConn, 'zs_players', PLAYER_COLS, PLAYER_KEYS);
   MyPrepareTable(FConn, 'zs_maps', MAP_COLS, MAP_KEYS);
   MyPrepareTable(FConn, 'zs_server', SERVER_COLS, SERVER_KEYS);
+  if FWritePM then
+    MyPrepareTable(FConn, 'zs_player_map_stats', PM_COLS, PM_KEYS);
   { the other servers read what changed since they last looked; the index is there after the
     first run (a second try fails, which is fine) }
   if FReadPlayers then
@@ -360,8 +407,14 @@ var
   Rows, Whole: TMyBatch;
   k: LongInt;
   Stamp, Sid, Line, Cols, Tail: AnsiString;
+  Secs: Int64;
 begin
-  Stamp := MyDate(Now);
+  { a second later than any pass before (LastStampSec); the half second keeps the formatting in it }
+  Secs := Trunc(Now * 86400);
+  if Secs <= LastStampSec then
+    Secs := LastStampSec + 1;
+  LastStampSec := Secs;
+  Stamp := MyDate((Secs + 0.5) / 86400);
   Sid := MyInt(FServerId);
   Cols := SQL_PLAYER_COLS;
   Tail := SQL_PLAYER_TAIL;
@@ -437,6 +490,34 @@ begin
       Whole.Free;
     end;
 
+    { [Matrix]: the player-on-map records }
+    if B.SendPM then
+    begin
+      Rows := TMyBatch.Create(FConn, 'INSERT INTO zs_player_map_stats (' + SQL_PM_COLS + ') VALUES', SQL_PM_TAIL,
+        1024 * 1024);
+      try
+        for k := 0 to High(B.PlayerMaps) do
+        begin
+          if FStop then
+            Break;
+          Rows.Add('(' + Sid + ', ' + MyInt(B.PlayerMaps[k].AccountId) + ', ' +
+            MyStrMax(CpToUtf8(B.PlayerMaps[k].MapName, FCodepage), 64) + ', ' + MyInt(B.PlayerMaps[k].Matches) + ', ' +
+            MyInt(B.PlayerMaps[k].Wins) + ', ' + MyInt(B.PlayerMaps[k].Losses) + ', ' + MyInt(B.PlayerMaps[k].Draws) + ', ' +
+            MyInt(B.PlayerMaps[k].RoundsWon) + ', ' + MyInt(B.PlayerMaps[k].RoundsLost) + ', ' +
+            MyInt(B.PlayerMaps[k].Kills) + ', ' + MyInt(B.PlayerMaps[k].Deaths) + ', ' + MyInt(B.PlayerMaps[k].Assists) +
+            ', ' + MyInt(B.PlayerMaps[k].Selfkills) + ', ' + MyInt(B.PlayerMaps[k].Teamkills) + ', ' +
+            MyInt(B.PlayerMaps[k].Points) + ', ' + MyInt(B.PlayerMaps[k].Caps) + ', ' + MyInt(B.PlayerMaps[k].Shots) +
+            ', ' + MyInt(B.PlayerMaps[k].Hits) + ', ' + MyInt(B.PlayerMaps[k].Headshots) + ', ' +
+            MyFloat(B.PlayerMaps[k].DamageDealt) + ', ' + MyFloat(B.PlayerMaps[k].DamageReceived) + ', ' +
+            MyInt(B.PlayerMaps[k].PlaySeconds) + ', ' + MyDate(B.PlayerMaps[k].FirstPlayed) + ', ' +
+            MyDate(B.PlayerMaps[k].LastPlayed) + ', ' + Stamp + ')');
+        end;
+        Rows.Flush;
+      finally
+        Rows.Free;
+      end;
+    end;
+
     Line := ' (' + Sid + ', ' + MyInt(B.Accounts) + ', ' + MyInt(B.PeakOnline) + ', ' + MyInt(B.TotalMatches) + ', ' + Stamp;
     if B.ShareServer then
       FConn.Exec('INSERT INTO zs_server (' + SQL_SERVER_COLS + ', shared_data, shared_sum, shared_at) VALUES' + Line +
@@ -453,6 +534,10 @@ begin
         ' OR updated_at IS NULL)');
       FConn.Exec('DELETE FROM zs_maps WHERE server_id = ' + Sid + ' AND (updated_at < ' + Stamp +
         ' OR updated_at IS NULL)');
+      { records pruned, reset or merged away here }
+      if B.SendPM then
+        FConn.Exec('DELETE FROM zs_player_map_stats WHERE server_id = ' + Sid + ' AND (updated_at < ' + Stamp +
+          ' OR updated_at IS NULL)');
     end;
     FConn.Exec('COMMIT');
   except
@@ -743,6 +828,7 @@ begin
         B := FBatch;
         FBatch.Players := nil;
         FBatch.Maps := nil;
+        FBatch.PlayerMaps := nil;
         FHasBatch := False;
       end;
     finally
@@ -783,6 +869,7 @@ begin
       end;
     B.Players := nil;
     B.Maps := nil;
+    B.PlayerMaps := nil;
     EnterCriticalSection(FLock);
     FBusy := False;
     LeaveCriticalSection(FLock);
@@ -878,10 +965,10 @@ end;
   fingerprint) }
 function MirrorKey(E: TZSEngine): AnsiString;
 begin
-  Result := Format('%s|%d|%s|%s|%s|%d|%d|%d|%d%d%d', [E.Cfg.MySQLHost, E.Cfg.MySQLPort, E.Cfg.MySQLDatabase,
+  Result := Format('%s|%d|%s|%s|%s|%d|%d|%d|%d%d%d%d', [E.Cfg.MySQLHost, E.Cfg.MySQLPort, E.Cfg.MySQLDatabase,
     E.Cfg.MySQLUser, MD5Print(MD5String(E.Cfg.MySQLPassword)), E.Cfg.MySQLServerID, E.Cfg.SourceCodepage,
     E.Cfg.StartingPoints, Ord(E.Cfg.MySQLShareProfiles or E.Cfg.MySQLShareRankings), Ord(E.Cfg.MySQLShareMaps),
-    Ord(E.Cfg.MySQLShareWeapons or E.Cfg.MySQLShareServer)]);
+    Ord(E.Cfg.MySQLShareWeapons or E.Cfg.MySQLShareServer), Ord(E.Cfg.MatrixEnabled)]);
 end;
 
 procedure MirrorTick(E: TZSEngine; NowMs: Int64);
@@ -896,6 +983,7 @@ var
   Online: array of Boolean;
   SharePlayers: Boolean;
   Sum: TPlayerProfile;
+  PR: PPlayerMapStats;
 begin
   { [MySQL] switched off or changed by a reload of settings.ini: the thread still works with the
     old settings, so it stops (a pass that waits for the database is cut) and the copy starts
@@ -998,6 +1086,45 @@ begin
     { SharedMaps: the whole map (MirrorRecordDue; the running map always) }
     if E.Cfg.MySQLShareMaps and MirrorRecordDue(Full, k = E.Match.MapIndex, E.DB.Maps[k].LastPlayedTime, Since) then
       B.Maps[k].Shared := EncodeStringBase64(EncodeMap(E.DB.Maps[k]));
+  end;
+  { [Matrix]: the player-on-map records played since the last pass, every one in a whole pass }
+  B.SendPM := E.Cfg.MatrixEnabled;
+  B.PlayerMaps := nil;
+  if B.SendPM then
+  begin
+    SetLength(B.PlayerMaps, E.DB.PM.Count);
+    n := 0;
+    for k := 0 to E.DB.PM.Places - 1 do
+    begin
+      PR := E.DB.PM.Items[k];
+      if (PR = nil) or (n >= Length(B.PlayerMaps)) or (not Full and (PR^.LastPlayed < Since - 5 / 1440)) then
+        Continue;
+      B.PlayerMaps[n].AccountId := PR^.AccountId;
+      B.PlayerMaps[n].MapName := PR^.MapName;
+      B.PlayerMaps[n].Matches := PR^.Matches;
+      B.PlayerMaps[n].Wins := PR^.Wins;
+      B.PlayerMaps[n].Losses := PR^.Losses;
+      B.PlayerMaps[n].Draws := PR^.Draws;
+      B.PlayerMaps[n].RoundsWon := PR^.RoundsWon;
+      B.PlayerMaps[n].RoundsLost := PR^.RoundsLost;
+      B.PlayerMaps[n].Kills := PR^.Kills;
+      B.PlayerMaps[n].Deaths := PR^.Deaths;
+      B.PlayerMaps[n].Assists := PR^.Assists;
+      B.PlayerMaps[n].Selfkills := PR^.Selfkills;
+      B.PlayerMaps[n].Teamkills := PR^.Teamkills;
+      B.PlayerMaps[n].Points := PR^.Points;
+      B.PlayerMaps[n].Caps := PR^.Caps;
+      B.PlayerMaps[n].Shots := PR^.Shots;
+      B.PlayerMaps[n].Hits := PR^.Hits;
+      B.PlayerMaps[n].Headshots := PR^.HitsHead;
+      B.PlayerMaps[n].DamageDealt := PR^.DamageDealt;
+      B.PlayerMaps[n].DamageReceived := PR^.DamageReceived;
+      B.PlayerMaps[n].PlaySeconds := PR^.TimePlayed;
+      B.PlayerMaps[n].FirstPlayed := PR^.FirstPlayed;
+      B.PlayerMaps[n].LastPlayed := PR^.LastPlayed;
+      Inc(n);
+    end;
+    SetLength(B.PlayerMaps, n);
   end;
   { SharedWeapons, SharedServer: the server record and every account added up }
   if E.Cfg.MySQLShareWeapons or E.Cfg.MySQLShareServer then

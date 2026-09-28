@@ -1,4 +1,4 @@
-# ZitroStats 5.2 - Developer API
+# ZitroStats 5.5 - Developer API
 
 Other ScriptCore 3 scripts on the same server can read ZitroStats data - points, ranks, kills, ratings and more - by calling functions of the ZitroStats library. The values come from the statistics ZitroStats keeps in memory, so no files are read.
 
@@ -8,7 +8,7 @@ The API was tested from a second script on Soldat Server 2.8.2 (Windows).
 
 ## Requirements
 
-- ZitroStats 5.2 is installed and running; its `main.pas` starts the library.
+- ZitroStats 5.5 is installed and running; its `main.pas` starts the library.
 - The server allows libraries for scripts: `server.ini`, section `[ScriptCore3]`, `AllowDlls=1`.
 - Your script's `config.ini` contains `Sandboxed = 0` and `AllowDlls = 1`.
 
@@ -59,7 +59,7 @@ Use exactly the library path ZitroStats uses. A copy of the library in another f
 | Function | Result |
 | :--- | :--- |
 | `ZS_Is_Ready(): Integer` | 1 when ZitroStats has loaded its data, otherwise 0 |
-| `ZS_Get_Api_Version(): Integer` | `14` for ZitroStats 5.2 |
+| `ZS_Get_Api_Version(): Integer` | `15` for ZitroStats 5.5. The number follows the reserved calls of `main.pas` as well: the functions and StatIDs of this document are the same as with API 14 (ZitroStats 5.2) |
 | `ZS_API_Get_Player_Stat(SlotID, StatID): Double` | A statistic of the account used by the player in slot 1-32 |
 | `ZS_API_Get_Player_Name(SlotID): PChar` | Name of the player in the slot |
 | `ZS_API_Get_Player_Rank(SlotID): Integer` | Position of the player's account in the points ranking (1 = best) |
@@ -268,7 +268,7 @@ Kills := Round(ZS_API_Get_Profile_Stat(42, ZS_STAT_KILLS));   // account #42
 
 These are the reserved calls of the Notes above. They are described so that a script of your own does not get in their way.
 
-- The reserved damage event carries the health the victim had before the hit, so damage statistics never count more than the victim could lose.
+- The reserved damage event carries the health the victim had before the hit, so damage statistics never count more than the victim could lose, and the velocities of the victim and of the shooter at the hit (`Victim.VelX`, `Victim.VelY`, `Shooter.VelX`, `Shooter.VelY`): `!lastfight` shows how fast the one who was hit moved, and works out from the bullet where a shot nobody saw came from (the shots of a bot).
 - `main.pas` tells the library with `Map.RayCast` whether the killer still had a clear line to the victim (reserved kill event). The library can also ask `main.pas` about any line: it queues the reserved action `ACT_RAYCAST` (7; `ZS_Action_Int` 1 = request id, 2-3 = start, 6-7 = end) and `main.pas` answers with the reserved `ZS_Ev_Ray(RequestId, Answer, Tick)` (1 clear, 0 blocked, -1 not calibrated). ZitroStats uses it for "Cover (shot)", the line from where the lethal shot was fired to where it hit.
 - The team balance (`[Balance]` in `settings.ini`) works through two reserved calls. `main.pas` sets a `Game.Teams[n].OnBeforeJoin` handler for every team and asks `ZS_Team_Join(Slot, Team, OldTeam, Tick)` which team a joining player should enter (-1 keeps a player in their team; a new player, `OldTeam` 255, is never refused). The library moves players with the reserved action `ACT_MOVE` (8; `ZS_Action_Int` 1 = team, 2 = 1 when only a dead player may be moved) and `main.pas` answers with `ZS_Ev_Move_Result(Slot, Team, Result, Tick)` (1 moved, 2 still alive, 3 carries a flag, 4 refused, 5 already in the team). A script of your own that moves players with `ChangeTeam` goes through the same handlers, so the balance may place those players elsewhere; turn `[Balance] AssignJoins` off if your script decides the teams. A `ChangeTeam` to the player's own team - a respawn, the only kind `ScriptCore` itself has - is let through by `main.pas` untouched and never reaches `ZS_Team_Join`.
 - The score guard (`[Integrity]`) works in `main.pas`: it sets team scores the server gave for a join, a team change, a double capture or a match without opponents back, puts players a map change left dead back on their feet and keeps `/pause` from throwing a running map change away. It tells the library with the reserved call `ZS_Ev_Integrity`, and the library sends it its settings with the reserved action `ACT_INTEGRITY` (9). A script of your own that changes team scores may see them set back: turn `[Integrity] Enabled` off if your script keeps the score.

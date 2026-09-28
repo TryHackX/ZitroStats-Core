@@ -622,6 +622,19 @@ begin
     Result := Result + '|' + Engine.Extra[Slot].HudEvents[k];
 end;
 
+{ the text of the last HUD line sent to Slot that holds Part (any line for ''), '' for none }
+function HudLineWith(Slot: LongInt; const Part: AnsiString): AnsiString;
+var
+  k: LongInt;
+  Prefix: AnsiString;
+begin
+  Result := '';
+  Prefix := Format('%d|%d|Rank: ', [ACT_BIGTEXT, Slot]);
+  for k := Console.Count - 1 downto 0 do
+    if (Copy(Console[k], 1, Length(Prefix)) = Prefix) and ((Part = '') or (Pos(Part, Console[k]) > 0)) then
+      Exit(TextOf(Console[k]));
+end;
+
 procedure TickEv(A, B, TimeLeft: LongInt);
 var
   Ev: TZSEvent;
@@ -1343,6 +1356,31 @@ begin
     LeaveCriticalSection(Engine.StateLock);
   end;
   Check('a full HUD line gives its points entries up for the feats', Ok);
+  { a note that had its time on the HUD makes way first, a points note before a feat; then a points
+    note not shown yet; a feat not shown yet stays }
+  EnterCriticalSection(Engine.StateLock);
+  try
+    Engine.Extra[3].HudEvents := nil;
+    Engine.Extra[3].HudUntil := nil;
+    Engine.HudEvent(3, '+20 pts');
+    Engine.HudEvent(3, 'FIRST BLOOD!');
+    Engine.Extra[3].HudUntil[0] := Engine.GameTick + 1000;
+    Engine.Extra[3].HudUntil[1] := Engine.GameTick + 1000;
+    Engine.HudEvent(3, '+21 pts');
+    Engine.HudEvent(3, 'Double kill!');
+    Engine.HudEvent(3, 'Triple kill!');
+    Engine.HudEvent(3, 'RAMPAGE!');
+    Engine.HudEvent(3, 'Revenge!');
+    Engine.HudEvent(3, 'Assist');
+    Ok := (Length(Engine.Extra[3].HudUntil) = HUD_EVENTS_MAX) and
+      (HudNotes(3) = '|Double kill!|Triple kill!|RAMPAGE!|Revenge!');
+    WriteLn('       HUD notes: ', HudNotes(3));
+    Engine.Extra[3].HudEvents := nil;
+    Engine.Extra[3].HudUntil := nil;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  Check('a full HUD line gives up the notes it showed first (points before feats), then points not shown yet', Ok);
 
   { round 1: Bob spawns with the weapon menu open and takes his weapons with the first change; a
     swap and a gun from the ground are no picks. He wins the round with four kills, and the server
@@ -1442,7 +1480,9 @@ begin
       (B^.SpreeLives[6] = Snap[2].SpreeLives[6]) and (PS(4)^.SpreeLives[1] = Snap[4].SpreeLives[1] + 1));
     Check('a kill right after the round spawn is no spawn kill in survival',
       (B^.SpawnKills = Snap[2].SpawnKills) and (PS(3)^.SpawnDeaths = Snap[3].SpawnDeaths));
-    Check('first blood once per round', B^.FirstBloodCount = Snap[2].FirstBloodCount + 2);
+    Check('first blood once per match, the first blood of a round once per round (the first round too)',
+      (B^.FirstBloodCount = Snap[2].FirstBloodCount + 1) and
+      (B^.RoundFirstBloodCount = Snap[2].RoundFirstBloodCount + 2));
     Check('no double kill across the end of a round',
       (B^.PointmatchMode.Multi.DOUBLE_KILL = Snap[2].PointmatchMode.Multi.DOUBLE_KILL + 1) and
       (B^.PointmatchMode.Multi.TRIPLE_KILL = Snap[2].PointmatchMode.Multi.TRIPLE_KILL + 1) and
@@ -2009,6 +2049,260 @@ begin
   for i := 0 to Console.Count - 1 do
     if Pos('|0|', Console[i]) > 0 then
       WriteLn('       console: ', Copy(Console[i], Pos('|0|', Console[i]) + 3, 150));
+
+  { ---- the HUD: a note stays [HUD] EventSeconds on the line (2: two refreshes, drawn once a
+    second), with 1 one refresh ---- }
+  CurTick := 46000;
+  LeaveEv(7);
+  MapAfter('dm_Hud', GS_DM, 30);
+  CurTick := 46010;
+  SpawnWith(2, WEP_AK74, WEP_SOCOM, 100, 100);
+  SpawnWith(3, WEP_AK74, WEP_SOCOM, 300, 100);
+  SpawnWith(5, WEP_AK74, WEP_SOCOM, 500, 100);
+  { a refresh with the HUD off drops the notes the kills above left (no refresh since) }
+  CurTick := 46060;
+  TickEv(0, 0, 601);
+  Check('hud map processed', WaitProcessed);
+  EnterCriticalSection(Engine.StateLock);
+  try
+    for i := 2 to 5 do
+      if PS(i) <> nil then
+        PS(i)^.DisplayHUD := True;
+    Engine.Cfg.HudEventSeconds := 2;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  DrainActions;
+  Console.Clear;
+  CurTick := 46100;
+  Kill(2, 3, WEP_AK74, WEP_AK74, 100, 100, 300, 100, 0, 0, EF_A_ALIVE or EF_A_ONGROUND);
+  CurTick := 46120;
+  TickEv(0, 0, 600);
+  Done := WaitProcessed;
+  DrainActions;
+  ExportText := HudLineWith(2, '');
+  WriteLn('       HUD line: ', ExportText);
+  Check('the HUD line shows the notes of a kill at the next refresh', Done and (Pos('FIRST BLOOD!', ExportText) > 0) and
+    (Pos(' pts', ExportText) > 0));
+  Console.Clear;
+  CurTick := 46180;
+  TickEv(0, 0, 599);
+  Done := WaitProcessed;
+  DrainActions;
+  EnterCriticalSection(Engine.StateLock);
+  try
+    Ok := Pos('FIRST BLOOD!', Engine.Extra[2].HudText) > 0;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  Check('EventSeconds = 2: the notes stay on the line a second later (the same line, nothing sent again)',
+    Done and Ok and (HudLineWith(2, '') = ''));
+  Console.Clear;
+  CurTick := 46240;
+  TickEv(0, 0, 598);
+  Done := WaitProcessed;
+  DrainActions;
+  ExportText := HudLineWith(2, '');
+  Check('... and are gone after two seconds', Done and (ExportText <> '') and (Pos('FIRST BLOOD!', ExportText) = 0) and
+    (Pos(' pts', ExportText) = 0));
+  EnterCriticalSection(Engine.StateLock);
+  try
+    Engine.Cfg.HudEventSeconds := 1;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  Console.Clear;
+  CurTick := 46300;
+  Kill(2, 5, WEP_AK74, WEP_AK74, 100, 100, 500, 100, 0, 0, EF_A_ALIVE or EF_A_ONGROUND);
+  CurTick := 46360;
+  TickEv(0, 0, 597);
+  Done := WaitProcessed;
+  DrainActions;
+  ExportText := HudLineWith(2, '');
+  Check('EventSeconds = 1: the notes of the next kill, and no first blood again in the same match',
+    Done and (Pos(' pts', ExportText) > 0) and (Pos('FIRST BLOOD', ExportText) = 0));
+  Console.Clear;
+  CurTick := 46420;
+  TickEv(0, 0, 596);
+  Done := WaitProcessed;
+  DrainActions;
+  ExportText := HudLineWith(2, '');
+  Check('... gone a second later', Done and (ExportText <> '') and (Pos(' pts', ExportText) = 0));
+  EnterCriticalSection(Engine.StateLock);
+  try
+    Engine.Cfg.HudEventSeconds := 2;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+
+  { ---- survival deathmatch: FIRST BLOOD! once a match; the first kill of every round counts as a
+    round first blood of its own (the first round too), and the HUD says ROUND FIRST BLOOD for the
+    rounds after the first; the last man standing needs [Mechanics] LastStandMinPlayers (3)
+    players in the round ---- }
+  CurTick := 47000;
+  MapAfterFlags('dm_Rounds', GS_DM, 30, MF_SURVIVAL);
+  Check('rounds map processed', WaitProcessed);
+  EnterCriticalSection(Engine.StateLock);
+  try
+    for i := 2 to 5 do
+      if PS(i) <> nil then
+        Snap[i] := PS(i)^;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  DrainActions;
+  Console.Clear;
+  { round 1 of three players: Bob draws the first blood of the match, up stands last }
+  CurTick := 47010;
+  SpawnWith(2, WEP_AK74, WEP_SOCOM, 100, 100);
+  SpawnWith(3, WEP_AK74, WEP_SOCOM, 300, 100);
+  SpawnWith(5, WEP_AK74, WEP_SOCOM, 500, 100);
+  CurTick := 47100;
+  Kill(2, 3, WEP_AK74, WEP_AK74, 100, 100, 300, 100, 0, 0, EF_A_ALIVE or EF_A_ONGROUND);
+  CurTick := 47120;
+  TickEv(0, 0, 600);
+  CurTick := 47200;
+  Kill(5, 2, WEP_AK74, WEP_AK74, 500, 100, 100, 100, 0, 0, EF_A_ALIVE or EF_A_ONGROUND);
+  CurTick := 47260;
+  TickEv(0, 0, 599);
+  { round 2 of three players: Carl's first kill is the round's, and he stands last }
+  CurTick := 47500;
+  SpawnWith(2, WEP_AK74, WEP_SOCOM, 100, 100);
+  SpawnWith(3, WEP_AK74, WEP_SOCOM, 300, 100);
+  SpawnWith(5, WEP_AK74, WEP_SOCOM, 500, 100);
+  CurTick := 47600;
+  Kill(3, 5, WEP_AK74, WEP_AK74, 300, 100, 500, 100, 0, 0, EF_A_ALIVE or EF_A_ONGROUND);
+  CurTick := 47620;
+  TickEv(0, 0, 590);
+  CurTick := 47700;
+  Kill(3, 2, WEP_AK74, WEP_AK74, 300, 100, 100, 100, 0, 0, EF_A_ALIVE or EF_A_ONGROUND);
+  CurTick := 47760;
+  TickEv(0, 0, 589);
+  Check('rounds 1 and 2 of the first bloods processed', WaitProcessed);
+  DrainActions;
+  Check('round 1: FIRST BLOOD! for the first kill of the match, and no ROUND FIRST BLOOD on top',
+    (HudLineWith(2, 'FIRST BLOOD!') <> '') and (HudLineWith(2, 'ROUND FIRST BLOOD') = ''));
+  Check('round 2: ROUND FIRST BLOOD for the first kill of the round, no FIRST BLOOD! again',
+    (HudLineWith(3, 'ROUND FIRST BLOOD') <> '') and (HudLineWith(3, 'FIRST BLOOD!') = ''));
+  Check('the last man standing of three players, on the HUD', (HudLineWith(5, 'Last man standing!') <> '') and
+    (HudLineWith(3, 'Last man standing!') <> ''));
+  { round 3, one against one: Carl watches }
+  Console.Clear;
+  CurTick := 47800;
+  TeamSwitch(3, TEAM_SPEC);
+  CurTick := 48000;
+  SpawnWith(2, WEP_AK74, WEP_SOCOM, 100, 100);
+  SpawnWith(5, WEP_AK74, WEP_SOCOM, 500, 100);
+  CurTick := 48100;
+  Kill(2, 5, WEP_AK74, WEP_AK74, 100, 100, 500, 100, 0, 0, EF_A_ALIVE or EF_A_ONGROUND);
+  CurTick := 48160;
+  TickEv(0, 0, 580);
+  Check('round 3 of the first bloods processed', WaitProcessed);
+  DrainActions;
+  EnterCriticalSection(Engine.StateLock);
+  try
+    A := PS(2);
+    B := PS(3);
+    C := PS(5);
+    Check('Bob: the first blood of the match once, the first bloods of rounds 1 and 3, round 3 won, no last stand',
+      (A^.FirstBloodCount = Snap[2].FirstBloodCount + 1) and
+      (A^.RoundFirstBloodCount = Snap[2].RoundFirstBloodCount + 2) and
+      (A^.RoundsWins = Snap[2].RoundsWins + 1) and (A^.LastStand = Snap[2].LastStand));
+    Check('Carl: the first blood of round 2 only, the last man standing of it',
+      (B^.FirstBloodCount = Snap[3].FirstBloodCount) and
+      (B^.RoundFirstBloodCount = Snap[3].RoundFirstBloodCount + 1) and
+      (B^.RoundsWins = Snap[3].RoundsWins + 1) and (B^.LastStand = Snap[3].LastStand + 1));
+    Check('up: the last man standing of round 1, no first blood',
+      (C^.FirstBloodCount = Snap[5].FirstBloodCount) and (C^.RoundFirstBloodCount = Snap[5].RoundFirstBloodCount) and
+      (C^.RoundsWins = Snap[5].RoundsWins + 1) and (C^.LastStand = Snap[5].LastStand + 1) and
+      (C^.RoundsLose = Snap[5].RoundsLose + 2));
+    Engine.Cfg.LastStandMinPlayers := 2;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  Check('round 3: one against one is a round won, no last man standing',
+    (HudLineWith(2, 'ROUND FIRST BLOOD') <> '') and (SeenCount('Last man standing!') = 0) and Seen('Round won by Bob'));
+  { round 4, one against one with LastStandMinPlayers = 2 }
+  CurTick := 48400;
+  SpawnWith(2, WEP_AK74, WEP_SOCOM, 100, 100);
+  SpawnWith(5, WEP_AK74, WEP_SOCOM, 500, 100);
+  CurTick := 48500;
+  Kill(5, 2, WEP_AK74, WEP_AK74, 500, 100, 100, 100, 0, 0, EF_A_ALIVE or EF_A_ONGROUND);
+  CurTick := 48560;
+  TickEv(0, 0, 570);
+  { the next match: the first blood of the match again }
+  CurTick := 48600;
+  MapAfterFlags('dm_Rounds', GS_DM, 30, MF_SURVIVAL);
+  TeamSwitch(3, TEAM_NONE);
+  CurTick := 48700;
+  SpawnWith(2, WEP_AK74, WEP_SOCOM, 100, 100);
+  SpawnWith(3, WEP_AK74, WEP_SOCOM, 300, 100);
+  SpawnWith(5, WEP_AK74, WEP_SOCOM, 500, 100);
+  CurTick := 48800;
+  Kill(5, 3, WEP_AK74, WEP_AK74, 500, 100, 300, 100, 0, 0, EF_A_ALIVE or EF_A_ONGROUND);
+  Check('round 4 and the next match processed', WaitProcessed);
+  EnterCriticalSection(Engine.StateLock);
+  try
+    C := PS(5);
+    Check('LastStandMinPlayers = 2: one against one is a last stand',
+      (C^.LastStand = Snap[5].LastStand + 2) and (C^.RoundsWins = Snap[5].RoundsWins + 2));
+    { up drew the first blood of round 4 and then the first kill of the next match }
+    Check('a new match: its first kill is the first blood of the match and of its first round',
+      (C^.FirstBloodCount = Snap[5].FirstBloodCount + 1) and
+      (C^.RoundFirstBloodCount = Snap[5].RoundFirstBloodCount + 2));
+    Engine.Cfg.LastStandMinPlayers := 3;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+
+  { ---- team survival: a last stand needs LastStandMinPlayers humans on the teams in the round ---- }
+  CurTick := 49000;
+  Join(6, 'a', 'S1006', 'HWF', '6.6.6.6', TEAM_BRAVO, 0);
+  MapAfterFlags('tm_Stand', GS_TM, 30, MF_SURVIVAL);
+  TeamSwitch(2, TEAM_ALPHA);
+  TeamSwitch(3, TEAM_ALPHA);
+  TeamSwitch(5, TEAM_BRAVO);
+  CurTick := 49100;
+  for i := 2 to 6 do
+    if i <> 4 then
+      SpawnWith(i, WEP_AK74, WEP_SOCOM, 100 + 200 * i, 100);
+  Check('team survival map processed', WaitProcessed);
+  EnterCriticalSection(Engine.StateLock);
+  try
+    for i := 2 to 6 do
+      if PS(i) <> nil then
+        Snap[i] := PS(i)^;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  CurTick := 49200;
+  Kill(2, 5, WEP_AK74, WEP_AK74, 300, 100, 1100, 100, 0, 0, EF_A_ALIVE or EF_A_ONGROUND);
+  Check('two against two processed', WaitProcessed);
+  EnterCriticalSection(Engine.StateLock);
+  try
+    Check('two against two: the one left alone against two has a last stand (4 players)',
+      PS(6)^.LastStand = Snap[6].LastStand + 1);
+    Engine.Cfg.LastStandMinPlayers := 5;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  CurTick := 49400;
+  MapAfterFlags('tm_Stand2', GS_TM, 30, MF_SURVIVAL);
+  CurTick := 49500;
+  for i := 2 to 6 do
+    if i <> 4 then
+      SpawnWith(i, WEP_AK74, WEP_SOCOM, 100 + 200 * i, 100);
+  CurTick := 49600;
+  Kill(2, 5, WEP_AK74, WEP_AK74, 300, 100, 1100, 100, 0, 0, EF_A_ALIVE or EF_A_ONGROUND);
+  Check('two against two again processed', WaitProcessed);
+  EnterCriticalSection(Engine.StateLock);
+  try
+    Check('LastStandMinPlayers = 5: two against two gives no last stand',
+      (PS(6)^.LastStand = Snap[6].LastStand + 1) and (PS(2)^.Kills = Snap[2].Kills + 2));
+    Engine.Cfg.LastStandMinPlayers := 3;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
   Engine.Free;
 
   { A database that cannot be read is replaced by the newest backup. The damaged files are renamed

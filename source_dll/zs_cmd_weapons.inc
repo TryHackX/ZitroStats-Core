@@ -758,47 +758,57 @@ begin
   Footer(E, Slot, W);
 end;
 
-{ what the whole server knows about one weapon: used by !wep and by !serverwep }
-procedure WeaponGlobalSection(E: TZSEngine; Slot, S, W: LongInt);
+{ the kills by their distance (under 10, 25, 50, 100 m and more), nothing without kills: a row of
+  numbers is hard to read, so the shares get their own columns under their names, with a bar under
+  them so the shape is visible at a glance }
+procedure DistanceRows(E: TZSEngine; Slot: LongInt; const Buckets: array of Int64);
 const
-  { the kill distances: the name and five ranges, each range with its share and a bar under it }
+  { the name and five ranges, each range with its share and a bar under it }
   DIST_NAME_W = 16;
   DIST_COL_W = 16;
   DIST_BAR = 12;
+var
+  k: LongInt;
+  Total: Int64;
+  Line: AnsiString;
+begin
+  Total := 0;
+  for k := 0 to Min(4, High(Buckets)) do
+    Inc(Total, Buckets[k]);
+  if Total <= 0 then
+    Exit;
+  Line := PadR('Kill distance', DIST_NAME_W);
+  for k := 0 to 4 do
+    Line := Line + PadR(DIST_BUCKET_NAMES[k], DIST_COL_W);
+  Out(E, Slot, TrimRight(Line), CLR_SUBHEADER);
+  Line := PadR('', DIST_NAME_W);
+  for k := 0 to Min(4, High(Buckets)) do
+    Line := Line + PadR(Pct(Buckets[k], Total), DIST_COL_W);
+  Out(E, Slot, TrimRight(Line), WHITE);
+  { a range with kills gets one sign at least }
+  Line := PadR('', DIST_NAME_W);
+  for k := 0 to Min(4, High(Buckets)) do
+    if Buckets[k] > 0 then
+      Line := Line + PadR(StringOfChar('#', Max(Int64(1), Round(Buckets[k] * DIST_BAR / Total))), DIST_COL_W)
+    else
+      Line := Line + PadR('', DIST_COL_W);
+  Out(E, Slot, TrimRight(Line), CLR_OTHER_ROW);
+end;
+
+{ what the whole server knows about one weapon: used by !serverwep }
+procedure WeaponGlobalSection(E: TZSEngine; Slot, S, W: LongInt);
 var
   G: TWeaponGlobal;
   SV: PServerRecords;
   k, Nem, Vic: LongInt;
   NemCount, VicCount: LongInt;
-  Total, TeamPicks: Int64;
-  Line: AnsiString;
+  TeamPicks: Int64;
   Cells: TStringArray;
 begin
   SV := WeaponServer(E);
   G := SV^.WeaponGlobal[S];
   Section(E, Slot, 'Server-wide for this weapon', W);
-  Total := G.DistBucket[0] + G.DistBucket[1] + G.DistBucket[2] + G.DistBucket[3] + G.DistBucket[4];
-  if Total > 0 then
-  begin
-    { a row of numbers is hard to read: the shares get their own columns under their names,
-      with a bar under them so the shape is visible at a glance }
-    Line := PadR('Kill distance', DIST_NAME_W);
-    for k := 0 to 4 do
-      Line := Line + PadR(DIST_BUCKET_NAMES[k], DIST_COL_W);
-    Out(E, Slot, TrimRight(Line), CLR_SUBHEADER);
-    Line := PadR('', DIST_NAME_W);
-    for k := 0 to 4 do
-      Line := Line + PadR(Pct(G.DistBucket[k], Total), DIST_COL_W);
-    Out(E, Slot, TrimRight(Line), WHITE);
-    { a range with kills gets one sign at least }
-    Line := PadR('', DIST_NAME_W);
-    for k := 0 to 4 do
-      if G.DistBucket[k] > 0 then
-        Line := Line + PadR(StringOfChar('#', Max(Int64(1), Round(G.DistBucket[k] * DIST_BAR / Total))), DIST_COL_W)
-      else
-        Line := Line + PadR('', DIST_COL_W);
-    Out(E, Slot, TrimRight(Line), CLR_OTHER_ROW);
-  end;
+  DistanceRows(E, Slot, G.DistBucket);
   Cells := nil;
   if G.KillDistCount > 0 then
     PushCell(Cells, 'Avg Kill Dist: ' + FloatStr(G.KillDistSum / G.KillDistCount, 1) + 'm')
@@ -856,6 +866,33 @@ begin
   FlowCells(E, Slot, Cells, 3, WHITE);
 end;
 
+{ !wep: the kills of the account with one weapon as !serverwep shows those of the whole server - by
+  distance, the average distance, the time from the first hit to the kill and the kills of a victim
+  with a vest. The account keeps them since 5.5: older kills have none. }
+procedure WeaponOwnSection(E: TZSEngine; Slot: LongInt; const WS: TWeaponStats; Kills: Int64; W: LongInt);
+var
+  k: LongInt;
+  Buckets: array[0..4] of Int64;
+  Cells: TStringArray;
+begin
+  Section(E, Slot, 'Distances and times to kill', W);
+  for k := 0 to 4 do
+    Buckets[k] := WS.DistBucket[k];
+  DistanceRows(E, Slot, Buckets);
+  Cells := nil;
+  if WS.KillDistCount > 0 then
+    PushCell(Cells, 'Avg Kill Dist: ' + FloatStr(WS.KillDistSum / WS.KillDistCount, 1) + 'm')
+  else
+    PushCell(Cells, 'Avg Kill Dist: -');
+  PushCell(Cells, 'Avg TTK: ' + MetricText(mfSec, SafeDivD(WS.TTKSumTicks, WS.TTKCount) / TICKS_PER_SECOND));
+  { the vest is a bonus: a server without bonuses has no vest kills }
+  if WS.VestKills > 0 then
+    PushCell(Cells, 'Vest kills: ' + Num(WS.VestKills));
+  FlowCells(E, Slot, Cells, 3, WHITE);
+  if (Kills > 0) and (WS.KillDistCount + WS.TTKCount + WS.VestKills = 0) then
+    Out(E, Slot, 'Counted for every account since 5.5: the kills before have no distance or time here.', CLR_HINT);
+end;
+
 { the weapon names, for !wep help and !serverwep help }
 procedure WeaponHelp(E: TZSEngine; Slot: LongInt; const Title, Usage, Example: AnsiString);
 const
@@ -870,6 +907,7 @@ begin
   Out(E, Slot, 'Special: knife(11), saw(12), law(13), flamer(14), bow(15), arrows(16)', CLR_SHOOTING);
   Out(E, Slot, 'Other:   statgun(30), grenade(50), cluster(51), fists(255)', CLR_SHOOTING);
   Out(E, Slot, 'A beginning or a part of a name is enough (barr, sni, mini), a typo too.', CLR_HINT);
+  Out(E, Slot, 'wep or weap, either works in a command: !weap, !serverweap, !mapweap, !topweaps', CLR_HINT);
   Footer(E, Slot, W);
 end;
 
@@ -1570,7 +1608,8 @@ begin
   Out(E, Slot, 'Sweet Spot: ' + WeaponSweetSpot(Wep), WHITE);
   ReloadSection(E, Slot, Wep, ReloadTotalsOf(P^.Weapons[S]), W);
 
-  WeaponGlobalSection(E, Slot, S, W);
+  { the account's own distances and times to kill; the whole server's are !serverwep's }
+  WeaponOwnSection(E, Slot, P^.Weapons[S], V.Kills, W);
 
   case Wep of
     WEP_M79:
@@ -1613,6 +1652,8 @@ begin
       Row(E, Slot, [Format('Throws: %s, enemy hits %s', [Num(P^.ClusterNadesThrows), Num(P^.ClusterNadesHurtsEnemy)]),
         Format('TK: %s | Self: %s', [Num(P^.ClusterNadesHurtsFriendly), Num(P^.ClusterNadesHurtsSelf)])], COLS2, CLR_SHOOTING);
   end;
+  Out(E, Slot, Format('The whole server: !serverwep %s   against the other weapons: !playermatchup %s [p]',
+    [LowerCase(SlotShortName(S)), LowerCase(SlotShortName(S))]), CLR_HINT);
   Footer(E, Slot, W);
 end;
 
@@ -1676,7 +1717,37 @@ type
   TMatchupTable = array[0..WSLOT_COUNT - 1, 0..WSLOT_COUNT - 1] of LongInt;
   PMatchupTable = ^TMatchupTable;
 
-procedure CmdMatchups(E: TZSEngine; Slot: LongInt; const Query: AnsiString; Page: LongInt);
+const
+  { the orders of the lists of weapon duels: !matchup keeps the first, the sort flags of the per-map
+    views (zs_cmd_matrix.inc) pick the others }
+  DUEL_BY_DUELS = 0;
+  DUEL_BY_WINS = 1;
+  DUEL_BY_LOSSES = 2;
+  DUEL_BY_RATE = 3;
+
+{ the keys of a row of duels between two weapons (Won, Lost) for an order of the duel lists; Tie
+  breaks equal numbers of duels }
+procedure DuelSortKeys(Row, Won, Lost, Sort: LongInt; Asc: Boolean; Tie: Double);
+var
+  Total: Double;
+begin
+  Total := Int64(Won) + Lost;
+  case Sort of
+    DUEL_BY_WINS: SetSortKeys(Row, Won, Total, Tie, Asc);
+    DUEL_BY_LOSSES: SetSortKeys(Row, Lost, Total, Tie, Asc);
+    DUEL_BY_RATE: SetSortKeys(Row, SafeDivD(Won, Total), Total, Won, Asc);
+    else SetSortKeys(Row, Total, Tie, 0, Asc);
+  end;
+end;
+
+{ The duels of a table of kills (MU[k, j]: kills with the weapon slot k against a player who held
+  j) - of the whole server (!matchup) or of one map (!mapmatchup): S < 0 every pair of weapons, most
+  duels first; else the weapon S against every other one it met. Where names the map in the titles
+  (' on ctf_Ash', '' for the server), More is the hint to the view of one weapon; Kind and Key are
+  what /zs_next and the others page with. Sort and Asc: the order (DUEL_BY_...), SortText what the
+  title says of it (' by wins', '' for the server). }
+procedure MatchupList(E: TZSEngine; Slot: LongInt; MU: PMatchupTable; S: LongInt; const Where, More: AnsiString;
+  Page, Kind: LongInt; const Key: AnsiString; Sort: LongInt; Asc: Boolean; const SortText: AnsiString);
 const
   W = LINE_W;
   { place, the two weapons, duels, the wins of each and the verdict: at most 85 of LINE_W }
@@ -1684,16 +1755,14 @@ const
   { opponent, kills, deaths, win rate, its 95% range, ratio and the edge: at most 77 of LINE_W }
   CW: array[0..6] of LongInt = (18, 8, 8, 10, 11, 8, 14);
 var
-  S, k, j, n, Won, Lost, Total, Color, PerPage, Pages, First, Last: LongInt;
+  k, j, n, Won, Lost, Total, Color, PerPage, Pages, First, Last: LongInt;
   A, B: array of LongInt;
   Rows: TIntArray;
   Lo, Hi: Double;
   Edge: AnsiString;
-  MU: PMatchupTable;
 begin
-  MU := @WeaponServer(E)^.Matchups;
   PerPage := Max(5, E.Cfg.TopDisplayLinesCount);
-  if Trim(Query) = '' then
+  if S < 0 then
   begin
     A := nil;
     B := nil;
@@ -1710,22 +1779,19 @@ begin
         end;
     if n = 0 then
     begin
-      Out(E, Slot, 'No weapon duels recorded yet.', CLR_OTHER_ROW);
+      Out(E, Slot, 'No weapon duels recorded' + Where + ' yet.', CLR_OTHER_ROW);
       Exit;
     end;
     Pages := PageCount(n, PerPage);
     Page := EnsureRange(Page, 1, Pages);
     First := (Page - 1) * PerPage;
     Last := Min(n, First + PerPage) - 1;
-    Header(E, Slot, Format('Weapon Matchups: Top Rivalries [Page %d/%d] (%d)', [Page, Pages, n]), W);
+    Header(E, Slot, Format('Weapon Matchups%s: Top Rivalries%s [Page %d/%d] (%d)', [Where, SortText, Page, Pages, n]), W);
     Row(E, Slot, ['#', 'Duel Rivalry', 'Duels', 'A Wins', 'B Wins', 'Verdict'], CR, CLR_SUBHEADER);
     Rule(E, Slot, W);
-    PrepareSort(n, 1);
+    PrepareSort(n, 2);
     for k := 0 to n - 1 do
-    begin
-      SortKeys[k] := MU^[A[k], B[k]] + MU^[B[k], A[k]];
-      SortTie[k] := 0;
-    end;
+      DuelSortKeys(k, MU^[A[k], B[k]], MU^[B[k], A[k]], Sort, Asc, 0);
     Rows := OrderedRows(n);
     for k := First to Last do
     begin
@@ -1746,15 +1812,12 @@ begin
         Format('%s (%s)', [Num(Won), Pct(Won, Total)]), Format('%s (%s)', [Num(Lost), Pct(Lost, Total)]), Edge], CR, CLR_SHOOTING);
     end;
     Out(E, Slot, 'A weapon is favored only when its 95% win-rate range stays above 50%.', CLR_HINT);
-    Out(E, Slot, '!matchup <weapon> shows one weapon; a number at the end is the page.', CLR_HINT);
+    Out(E, Slot, More, CLR_HINT);
     PageHint(E, Slot, Page, Pages, 'rivalries');
-    Remember(E, Slot, QK_MATCHUP, '', Page, Pages);
+    Remember(E, Slot, Kind, Key, Page, Pages);
     Exit;
   end;
 
-  S := WeaponSlotOrSay(E, Slot, Query, '!wep');
-  if S < 0 then
-    Exit;
   { the opponents with duels, most duels first }
   A := nil;
   SetLength(A, WSLOT_COUNT);
@@ -1767,21 +1830,18 @@ begin
     end;
   if n = 0 then
   begin
-    Out(E, Slot, 'No duels recorded for ' + SlotName(S) + ' yet.', CLR_HINT);
+    Out(E, Slot, 'No duels recorded for ' + SlotName(S) + Where + ' yet.', CLR_HINT);
     Exit;
   end;
-  PrepareSort(n, 1);
+  PrepareSort(n, 2);
   for k := 0 to n - 1 do
-  begin
-    SortKeys[k] := MU^[S, A[k]] + MU^[A[k], S];
-    SortTie[k] := 0;
-  end;
+    DuelSortKeys(k, MU^[S, A[k]], MU^[A[k], S], Sort, Asc, 0);
   Rows := OrderedRows(n);
   Pages := PageCount(n, PerPage);
   Page := EnsureRange(Page, 1, Pages);
   First := (Page - 1) * PerPage;
   Last := Min(n, First + PerPage) - 1;
-  Header(E, Slot, Format('Matchups: %s [Page %d/%d]', [SlotName(S), Page, Pages]), W);
+  Header(E, Slot, Format('Matchups: %s%s%s [Page %d/%d]', [SlotName(S), Where, SortText, Page, Pages]), W);
   Row(E, Slot, ['Opponent Weapon', 'Kills', 'Deaths', 'Win Rate', '95% Range', 'Ratio', 'Matchup Edge'], CW, CLR_SUBHEADER);
   Rule(E, Slot, W);
   for k := First to Last do
@@ -1796,5 +1856,22 @@ begin
   end;
   Out(E, Slot, 'Range: 95% sure the real win rate is inside. Edge only if the range misses 50%.', CLR_HINT);
   PageHint(E, Slot, Page, Pages, 'weapons');
-  Remember(E, Slot, QK_MATCHUP, SlotShortName(S), Page, Pages);
+  Remember(E, Slot, Kind, Key, Page, Pages);
+end;
+
+procedure CmdMatchups(E: TZSEngine; Slot: LongInt; const Query: AnsiString; Page: LongInt);
+var
+  S: LongInt;
+begin
+  if Trim(Query) = '' then
+  begin
+    MatchupList(E, Slot, @WeaponServer(E)^.Matchups, -1, '',
+      '!matchup <weapon> shows one weapon; a number at the end is the page.', Page, QK_MATCHUP, '', DUEL_BY_DUELS, False,
+      '');
+    Exit;
+  end;
+  S := WeaponSlotOrSay(E, Slot, Query, '!wep');
+  if S >= 0 then
+    MatchupList(E, Slot, @WeaponServer(E)^.Matchups, S, '', '', Page, QK_MATCHUP, SlotShortName(S), DUEL_BY_DUELS, False,
+      '');
 end;

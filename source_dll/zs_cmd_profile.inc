@@ -9,7 +9,7 @@ const
   COLS = 5;
   COLW = LINE_W div COLS;
 var
-  Feats, Pw: TStringArray;
+  Feats, Pw, Mx: TStringArray;
   Passwords: Boolean;
   Around: AnsiString;
 
@@ -65,6 +65,9 @@ begin
   AddFeat('!achievementsi n*');
   AddFeat('!achlist [p]');
   AddFeat('!achlisti n*');
+  { your last deaths, while [LastFight] is on }
+  if E.Cfg.LastFightEnabled then
+    AddFeat('!lastfight [1-3]');
   { the mode commands only where the mode is played }
   if E.Match.GameStyle = GS_PM then
     AddFeat('!pm [p]');
@@ -77,6 +80,26 @@ begin
   Section(E, Slot, 'Maps and server', LINE_W);
   CmdGrid(E, Slot, ['!mapstats [map]', '!heatmap [map]', '!topmaps [pg|map]', '!topmapsp [pg]', '!topmapsi n*',
     '!topmapsby m* [pg]', '!server', '!activity', '!contact'], COLS, COLW, WHITE);
+  { what the players did on the maps, while [Matrix] records it (zs_cmd_matrix.inc): x[i] is the
+    command and its "i" form; two columns each (three for the longest), two to a row }
+  if E.Cfg.MatrixEnabled then
+  begin
+    Section(E, Slot, 'A player over all maps', LINE_W);
+    CmdGrid(E, Slot, ['!playermaps[i] [flag] [pg] [p]', '!rivals[i] [flag] [pg] [p]',
+      '!versus[i] [flag] [pg] p* [p2]', '!playermatchup[i] [w] [flag] [pg] [p]'], COLS, COLW, WHITE);
+    Section(E, Slot, 'A player on one map', LINE_W);
+    Mx := ['!mapplayerstats[i] [map] [p]', '!mapplayerotherstats[i] [map] [p]', '!mapplayerweapstats[i] [map] [p]',
+      '!mapplayerrivals[i] [map] [flag] [pg] [p]', '!mapplayermatchup[i] [map] [flag] [pg] [p]'];
+    if E.Cfg.MatrixPlayerHeatmap then
+    begin
+      SetLength(Mx, Length(Mx) + 1);
+      Mx[High(Mx)] := '!playerheatmap[i] [map] [p]';
+    end;
+    CmdGrid(E, Slot, Mx, COLS, COLW, WHITE);
+    Section(E, Slot, 'One map, all its players', LINE_W);
+    CmdGrid(E, Slot, ['!maprivals [map] [flag] [pg]', '!mapmatchup [map] [w] [flag] [pg]',
+      '!mapweapstats [map] [flag] [pg]', '!mapwep w* [map]'], COLS, COLW, WHITE);
+  end;
   { the map vote: the commands of it this server answers (zs_cmd_mapvote.inc) }
   if Length(MapVoteHelpItems(E)) > 0 then
   begin
@@ -107,7 +130,8 @@ begin
   Rule(E, Slot, LINE_W);
   Out(E, Slot, '* required  [ ] optional  a|b = one of them  p = nick, part of it or #id', CLR_HINT);
   Out(E, Slot, 'n = ranking position  pg = page  map = map name or part of it  t = text  s = player slot', CLR_HINT);
-  Out(E, Slot, 'm = metrics (!topby help, weapon metrics: !topwepsby help)  w = weapon (!wep help, !weap = !wep)',
+  Out(E, Slot, 'm = metrics (!topby help, weapon metrics: !topwepsby help)  w = weapon (!wep help)', CLR_HINT);
+  Out(E, Slot, 'wep or weap, either works in a command: !weap = !wep, !mapweap = !mapwep, !topweaps = !topweps',
     CLR_HINT);
   { the lists that open at the page of a player or a map }
   Around := '!topmaps';
@@ -118,6 +142,19 @@ begin
   Out(E, Slot, '!top p / ' + Around + ' map = the page around that player or map  !top m = !topby m', CLR_HINT);
   Out(E, Slot, 'commands ending in "i" take a ranking position: !statsi 3  !wepi ak 3  !achi 3', CLR_HINT);
   Out(E, Slot, 'a nick that is a number: use its #id (!stats #12) or the "i" command', CLR_HINT);
+  { the per-map commands: the map comes first when the first word names one; the sort flag is
+    written out, as f is the file of the admin commands }
+  if E.Cfg.MatrixEnabled then
+  begin
+    Out(E, Slot, 'per-map commands: [map] (else the current one), [w], [flag], [pg], [p] in this order  p2 = player 2',
+      CLR_HINT);
+    Out(E, Slot, 'flag = the order (<cmd> help lists the flags, asc turns it round)  x[i] = also xi: n in place of p',
+      CLR_HINT);
+    Out(E, Slot, 'matrix = matchup: !playermatrix[i], !mapplayermatrix[i], !mapmatrix  !mapweapon = !mapwep', CLR_HINT);
+  end;
+  if E.Cfg.LastFightEnabled then
+    Out(E, Slot, '!lastfight [1-3] = your last deaths (1 = the last): the hits both ways, points, a dodge estimate',
+      CLR_HINT);
   if E.TeamGame then
     Out(E, Slot, '!bal, bal = team chances  !switch = to the weaker team  !join = spectator joins', CLR_HINT);
   if E.Cfg.MapVoteEnabled then
@@ -357,15 +394,17 @@ begin
   if not E.Match.Survival or (P^.SpawnKills + P^.SpawnDeaths > 0) then
     Row(E, Slot, ['Spawn Kills: ' + Num(P^.SpawnKills), 'Spawn Deaths: ' + Num(P^.SpawnDeaths)], COLS3, WHITE);
 
-  { Last stands and clutches belong to survival, saviors, avengers and comebacks to the team
-    modes; a feat of another mode shows only when the account has it. A kill that ends a
-    domination usually is a revenge as well, so the two are shown apart, not added up. }
+  { Round first bloods, last stands and clutches belong to survival, saviors, avengers and
+    comebacks to the team modes; a feat of another mode shows only when the account has it. A
+    kill that ends a domination usually is a revenge as well, so the two are shown apart, not
+    added up. }
   Section(E, Slot, 'Combat Feats & Streaks', LINE_W);
   if E.Match.Realistic or (P^.BinkRecoveryKills > 0) then
     Name := 'Bink Recovery: ' + Num(P^.BinkRecoveryKills)
   else
     Name := 'Pace: ' + FloatStr(SafeDivD(P^.Kills * 3600.0, P^.TimePlayed), 1) + ' kills/h';
   CellRows(E, Slot, ['Max Streak: ' + IntToStr(P^.MaxKillStreak), 'First Bloods: ' + Num(P^.FirstBloodCount),
+    IfText(E.Match.Survival or (P^.RoundFirstBloodCount > 0), 'Round First Bloods: ' + Num(P^.RoundFirstBloodCount)),
     'First Damage: ' + Num(P^.FirstDamageCount),
     'Dominations: ' + Num(P^.DominatingCount), 'Revenge Kills: ' + Num(P^.RevengeKills),
     'Dominations Ended: ' + Num(P^.RevengeFeats),

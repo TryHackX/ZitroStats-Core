@@ -9,7 +9,7 @@ program test_cmd_lint;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  SysUtils, Classes, Math, StrUtils, zs_types, zs_util, zs_db, zs_engine, zs_commands;
+  SysUtils, Classes, Math, StrUtils, zs_types, zs_util, zs_db, zs_engine, zs_commands, zs_matrix;
 
 const
   LONG_NAME = 'LongNameLongNameLongName';
@@ -33,7 +33,7 @@ const
     (Name: 'CTF survival'; Map: 'ctf_lint2'; Style: GS_CTF; Flags: 1 or 2));
 
   { every command of the help, the aliases, the arguments of each form }
-  PLAYER_CMDS: array[0..109] of AnsiString = (
+  PLAYER_CMDS: array[0..202] of AnsiString = (
     '!zitro', '!help', '!contact', '!hud',
     '!stats', '!stats alice', '!stats eve', '!stats bob', '!stats nobodyhere', '!stats ' + LONG_NAME, '!stats #1',
     '!statsi 1', '!statsi 999', '!statsi abc',
@@ -52,8 +52,34 @@ const
     '/zs_next', '/zs_prev', '!topweapons ak', '!topweapons ak 2', '!topweps knife', '!topweapons 2', '!topweapons kd',
     '!topweapons zzzz', '!spree eve', '!allweaponsby kills alice', '!allweaponsby acc;kd eve', '!allweaponsby help',
     '!allweaponsbyi reloads 1', '!serverweaponsby kills', '!serverweaponsby help', '!weaponsby dmg bob', '!topby kits',
-    '!topby healkits;medkits;nadekits');
+    '!topby healkits;medkits;nadekits', '!topby roundfirstblood;firstblood',
+    { the per-map views ([Matrix]): Eve has a record of a deathmatch player on the first map }
+    '!mapplayerstats', '!mapplayerstats eve', '!mapplayerstats rscs eve', '!mapplayerstats rscs alice',
+    '!mapplayerstats nobodyhere', '!mapplayerotherstats eve', '!mapplayerotherstats rscs eve',
+    '!mapplayerotherstats rscs alice', '!mapplayerweapstats eve', '!mapplayerweapstats rscs eve',
+    '!mapplayerweapstats rscs alice', '!mapplayerrivals rscs eve', '!mapplayerrivals rscs alice',
+    '!mapplayermatchup rscs eve', '!mapplayermatchup rscs alice', '!playerheatmap rscs eve', '!playerheatmap rscs alice',
+    '!playermaps eve', '!playermaps alice', '!rivals eve', '!rivals alice', '!rivals alice 2', '!maprivals',
+    '!maprivals rscs', '!versus eve', '!versus alice eve', '!versus alice bob', '!playermatchup eve',
+    '!playermatchup alice ak', '!playermatchup eve ak', '!mapmatchup', '!mapmatchup rscs ak', '!mapmatchup ak',
+    { the "i" forms, the sort flags, the pages, the matrix names and the weapons of a map }
+    '!mapplayerstatsi 1', '!mapplayerstatsi rscs 2', '!mapplayerotherstatsi rscs 1', '!mapplayerweapstatsi rscs 1',
+    '!mapplayerrivalsi rscs 1', '!mapplayerrivalsi rscs lost 1', '!mapplayermatchupi rscs 1', '!playerheatmapi rscs 1',
+    '!playermapsi 1', '!playermapsi points 1', '!rivalsi 1', '!rivalsi delta 1 1', '!rivalsi abc', '!versusi 1 2',
+    '!versusi 1', '!versusi', '!playermatchupi ak 1', '!playermatrix eve', '!playermatrixi 1', '!mapplayermatrix rscs eve',
+    '!mapplayermatrixi rscs 1', '!mapmatrix', '!mapmatrix rscs rate', '!rivals delta eve', '!rivals lost asc eve',
+    '!rivals help', '!mapplayerrivals rscs 1 eve', '!mapplayerrivals rscs won eve', '!maprivals points',
+    '!maprivals delta asc 1', '!maprivals help', '!playermaps kills eve', '!playermaps last asc eve', '!playermaps help',
+    '!playermatchup wins eve', '!playermatchup help', '!versus delta eve', '!mapweapstats', '!mapweapstats rscs acc',
+    '!mapweapsstats time asc 2', '!mapweapstats help', '!mapwep ak', '!mapwep barrett rscs', '!mapweapon knife', '!mapwep help',
+    '!mapwep zzz',
+    { wep or weap: the other spelling of every weapon command }
+    '!mapweap ak', '!serverweap ak', '!srvweap ak', '!serverweaps', '!srvweaps', '!serverweapsby kills',
+    '!srvweapsby help', '!topweaps knife', '!topweapsby kills', '!mapwepstats rscs acc', '!mapwepsstats',
+    '!mapplayerwepstats rscs eve', '!mapplayerwepstatsi rscs 1');
   PAGE_CMDS: array[0..5] of AnsiString = ('!top', '/zs_next', '/zs_prev', '/zs_page 3', '/zs_end', '/zs_first');
+  { !lastfight: the death of Bob in the setup (FightForLint), the forms without one }
+  FIGHT_CMDS: array[0..3] of AnsiString = ('!lastfight', '!lastfight 1', '!lastfight 2', '!lastfight x');
   ADMIN_CMDS: array[0..30] of AnsiString = (
     '/zs_status alice', '/zs_status eve', '/zs_status', '/zs_statusid 1', '/zs_statusi 1', '/searcha ali',
     '/searcha 11.22', '/zs_suspects', '/zs_perf', '/zs_backups', '/zs_restore', '/no', '/yes', '/zs_merge',
@@ -433,6 +459,65 @@ begin
     Known.Add(Names[k]);
 end;
 
+{ a death for !lastfight: Alice hits Bob twice from 35 m and the bot finishes him - a kill of a bot
+  changes no statistics the other commands show - and a second later the window after the death is
+  over }
+procedure FightForLint;
+var
+  Ev: TZSEvent;
+  k: LongInt;
+begin
+  CurTick := 100;
+  for k := 1 to 2 do
+  begin
+    Ev := NewEvent(zeSpawn);
+    Ev.Slot := k;
+    Ev.I[0] := WEP_AK74;
+    Ev.F[0] := 100 + (k - 1) * 490;
+    Ev.F[1] := 100;
+    Push(Ev);
+  end;
+  Ev := NewEvent(zeShot);
+  Ev.Slot := 1;
+  Ev.I[0] := WEP_AK74;
+  Ev.I[1] := 1;
+  Ev.F[0] := 100;
+  Ev.F[1] := 100;
+  Push(Ev);
+  for k := 0 to 2 do
+  begin
+    CurTick := 120 + k * 3;
+    Ev := NewEvent(zeDamage);
+    if k = 2 then
+      Ev.Slot := 7
+    else
+      Ev.Slot := 1;
+    Ev.Slot2 := 2;
+    Ev.I[0] := 5;
+    Ev.I[1] := WEP_AK74;
+    Ev.I[2] := EF_BULLET or EF_A_ALIVE;
+    Ev.F[0] := 24 * 1.004 * 0.95;
+    Ev.F[2] := 580;
+    Ev.F[3] := 100;
+    Ev.F[4] := 24;
+    Ev.F[6] := 590;
+    Ev.F[7] := 100;
+    Ev.F[8] := 65 - k * 22;
+    Push(Ev);
+  end;
+  { the kill comes in the tick of the hit that did it }
+  Ev := NewEvent(zeKill);
+  Ev.Slot := 7;
+  Ev.Slot2 := 2;
+  Ev.I[0] := 5;
+  Ev.I[1] := WEP_AK74;
+  Ev.I[2] := EF_BULLET or EF_A_ALIVE;
+  Push(Ev);
+  CurTick := 1000;
+  Push(NewEvent(zeTick));
+  WaitProcessed;
+end;
+
 procedure RunAll;
 var
   k: LongInt;
@@ -450,6 +535,13 @@ begin
   begin
     Run(2, PAGE_CMDS[k], False);
     Lint('player ' + PAGE_CMDS[k], 2, False);
+  end;
+  for k := 0 to High(FIGHT_CMDS) do
+  begin
+    Run(0, FIGHT_CMDS[k], True);
+    Lint('console ' + FIGHT_CMDS[k], 0, False);
+    Run(2, FIGHT_CMDS[k], False);
+    Lint('player ' + FIGHT_CMDS[k], 2, False);
   end;
   for k := 0 to High(ADMIN_CMDS) do
   begin
@@ -480,6 +572,10 @@ var
   Root: AnsiString;
   A, B, E, D: PPlayerProfile;
   M, w: LongInt;
+  R: PPlayerMapStats;
+  PW: PPMWeapon;
+  PR: PPMRival;
+  PX: PPMMatchup;
 begin
   Root := 'C:\Users\Dominik\AppData\Local\Temp\zlint';
   if GetEnvironmentVariable('ZLINT_DIR') <> '' then
@@ -492,7 +588,8 @@ begin
   Known := TStringList.Create;
   Known.Sorted := True;
   Known.Duplicates := dupIgnore;
-  AddKnown(['zitro', 'help', 'commands', 'cmds', 'contact', 'bal', 'teams', 'switch', 'join', 'hud', 'stats', 'statsi',
+  { !commands and !cmds belong to the owner's Basic script: no answer may name them }
+  AddKnown(['zitro', 'help', 'contact', 'bal', 'teams', 'switch', 'join', 'hud', 'stats', 'statsi',
     'otherstats', 'otherstatsi', 'status', 'statusi', 'rank', 'ranki', 'session', 'sessioni', 'top', 'topp', 'topi',
     'topid', 'topme', 'topo', 'topby', 'topskill', 'zs_search', 'zssearch', 'seasons', 'topday', 'topweek',
     'topmonth', 'topseason', 'allweapons', 'allweaponsi', 'wep', 'wepi', 'weap', 'weapi', 'matchup', 'serverweapons',
@@ -514,6 +611,18 @@ begin
   { the weapon tables by metrics }
   AddKnown(['allweaponsby', 'allweaponsbyi', 'weaponsby', 'weaponsbyi', 'serverweaponsby', 'serverwepsby', 'srvweaponsby',
     'srvwepsby']);
+  { the last deaths (zs_cmd_fight.inc) }
+  AddKnown(['lastfight']);
+  { what the players did on the maps (zs_cmd_matrix.inc) }
+  AddKnown(['mapplayerstats', 'mapplayerotherstats', 'mapplayerweapstats', 'mapplayerrivals', 'mapplayermatchup',
+    'playerheatmap', 'playermaps', 'rivals', 'versus', 'playermatchup', 'maprivals', 'mapmatchup']);
+  { their "i" forms, the matrix names of the matchup views and the weapons of a map }
+  AddKnown(['mapplayerstatsi', 'mapplayerotherstatsi', 'mapplayerweapstatsi', 'mapplayerrivalsi', 'mapplayermatchupi',
+    'playerheatmapi', 'playermapsi', 'rivalsi', 'versusi', 'playermatchupi', 'playermatrix', 'playermatrixi',
+    'mapplayermatrix', 'mapplayermatrixi', 'mapmatrix', 'mapweapstats', 'mapweapsstats', 'mapwep', 'mapweapon']);
+  { wep or weap, either spelling of a weapon command }
+  AddKnown(['mapweap', 'serverweap', 'srvweap', 'serverweaps', 'srvweaps', 'serverweapsby', 'srvweapsby', 'topweaps',
+    'topweapsby', 'mapwepstats', 'mapwepsstats', 'mapplayerwepstats', 'mapplayerwepstatsi']);
   { a maps folder of its own, one file with ".PMS" and one with ".Pms" among the maps }
   ForceDirectories(Root + PathDelim + 'maps');
   for M := 0 to High(LINT_MAPS) do
@@ -626,12 +735,72 @@ begin
       D^.Deaths := 7;
       D^.Shots := 40;
       D^.ShotsHits := 9;
+      { Eve on the first map: big counters of a deathmatch player only, a weapon, rivals, a duel and
+        where she killed and died }
+      R := Engine.DB.PM.Items[Engine.DB.PM.Obtain(E^.ID, Engine.DB.PM.MapNumber('rscs_lint', True), Now)];
+      if R <> nil then
+      begin
+        R^.Kills := 123456;
+        R^.Deaths := 98765;
+        R^.Assists := 12345;
+        R^.Selfkills := 23456;
+        R^.Points := 123456;
+        R^.TimePlayed := 2000000;
+        R^.Matches := 34567;
+        R^.Wins := 12345;
+        R^.Losses := 23456;
+        R^.Shots := 9876543;
+        R^.Hits := 2345678;
+        R^.HitsHead := 345678;
+        R^.HitsBody := 1234567;
+        R^.HitsLegs := 45678;
+        R^.DamageDealt := 98765432;
+        R^.DamageReceived := 87654321;
+        R^.HealRegen := 123456;
+        R^.BestStreak := 44;
+        R^.FirstBloods := 12345;
+        R^.LongestKill := 123.4;
+        PW := PMWeaponOf(R^, WEP_AK74);
+        PW^.Kills := 100000;
+        PW^.Deaths := 50000;
+        PW^.Shots := 5000000;
+        PW^.Hits := 1000000;
+        PW^.Headshots := 200000;
+        PW^.Damage := 50000000;
+        PW^.TimeUsed := 500000;
+        PR := PMRivalOf(R^, A^.ID, 200);
+        PR^.Kills := 12345;
+        PR^.Deaths := 23456;
+        PR^.DamageDealt := 1234567;
+        PR^.DamageTaken := 2345678;
+        PR^.LastFight := Now;
+        PR^.PointsWon := 123456;
+        PR^.PointsLost := 987654;
+        PR := PMRivalOf(R^, B^.ID, 200);
+        PR^.Kills := 34567;
+        PR^.Deaths := 45678;
+        PR^.LastFight := Now;
+        PR^.PointsWon := 45678;
+        PR^.PointsLost := 12;
+        PX := PMMatchupOf(R^, WEP_AK74, WEP_AK74);
+        PX^.Wins := 12345;
+        PX^.Losses := 23456;
+        for w := 0 to 20 do
+          PMHeatAdd(R^, w * 150, (w mod 5) * 100, w mod 2 = 0);
+        R^.Heat[0].Kills := 123456;
+        R^.Heat[0].Deaths := 98765;
+      end;
       { maps of both kinds }
       M := Engine.DB.FindMap('rscs_lint', True);
       if M >= 0 then
       begin
         Engine.DB.Maps[M].Kills := 1234567;
         Engine.DB.Maps[M].ActiveMapPlays := 23456;
+        { the weapons of the map (!mapweapstats, !mapwep): its own kills and picks }
+        Engine.DB.Maps[M].WeaponKills[WEP_AK74] := 123456;
+        Engine.DB.Maps[M].WeaponKills[WEP_BARRETT] := 23456;
+        Engine.DB.Maps[M].WeaponPicks[WEP_AK74] := 234567;
+        Engine.DB.Maps[M].WeaponPicks[WEP_SOCOM] := 345678;
       end;
       M := Engine.DB.FindMap('ctf_lint', True);
       if M >= 0 then
@@ -643,6 +812,11 @@ begin
   finally
     LeaveCriticalSection(Engine.StateLock);
   end;
+  FightForLint;
+  Run(2, '!lastfight', False);
+  Check('Bob''s death is there for !lastfight', (Pos('[ Last Fight 1/1: Bob ]', Lines.Text) > 0) and
+    (Pos('Killed by Bot Boogie (bot) with AK-74', Lines.Text) > 0) and (Pos('The hit that killed you: 21 dmg', Lines.Text) > 0) and
+    (Pos('you hit', Lines.Text) = 0) and (Pos('34 m', Lines.Text) > 0));
 
   for M := 0 to High(MODES) do
   begin

@@ -34,6 +34,10 @@ const
   REC_META = 5;
   REC_DEL_PROFILE = 6;
   REC_DEL_MAP = 7;
+  { a player-on-map record ([Matrix], zs_matrix), and its removal: the account id (4 bytes) and the
+    map name. Builds before 5.5 skip both. }
+  REC_PLAYERMAP = 8;
+  REC_DEL_PLAYERMAP = 9;
   REC_END = 255;
 
   STORE_FORMAT = 9;
@@ -51,6 +55,9 @@ type
     Maps: TMapProfileArray;
     MapCount: LongInt;
     Seasons: TSeasonArchiveArray;
+    { the player-on-map records; a nil place is one that was removed }
+    PlayerMaps: TPlayerMapPtrArray;
+    PlayerMapCount: LongInt;
   end;
 
   TStoreLoadInfo = record
@@ -157,12 +164,15 @@ type
     procedure JournalSeason(const A: TSeasonArchive);
     procedure JournalDeleteProfile(Id: LongInt);
     procedure JournalDeleteMap(Id: LongInt);
+    procedure JournalPlayerMap(const R: TPlayerMapStats);
+    procedure JournalDeletePlayerMap(AccountId: LongInt; const MapName: AnsiString);
     procedure Flush;
     procedure BeginSnapshot(ProfileCount, MapCount, SeasonCount: LongInt);
     procedure SnapshotProfile(const P: TPlayerProfile);
     procedure SnapshotMap(const M: TMapProfile);
     procedure SnapshotServer(const S: TServerRecords);
     procedure SnapshotSeason(const A: TSeasonArchive);
+    procedure SnapshotPlayerMap(const R: TPlayerMapStats);
     procedure CommitSnapshot(Tag: LongInt; const BackupPath: AnsiString);
     procedure AbortSnapshot;
     property Generation: LongWord read FGen;
@@ -199,6 +209,10 @@ type
   TApplyCtx = record
     ProfileIdx: TIdIndex;
     MapIdx: TIdIndex;
+    { the player-on-map records by account and map: open addressing, place + 1 in
+      St.PlayerMaps (0 = empty; a place that holds nil was removed and is passed over) }
+    PMHash: TIdIndex;
+    PMUsed: LongInt;
   end;
 
 { ---------------- helpers ---------------- }
@@ -466,6 +480,8 @@ begin
   St.Maps := nil;
   St.MapCount := 0;
   St.Seasons := nil;
+  FreePlayerMaps(St.PlayerMaps);
+  St.PlayerMapCount := 0;
 end;
 
 procedure GrowIndex(var Idx: TIdIndex; Id: LongInt);
@@ -480,11 +496,73 @@ begin
   SetLength(Idx, NewLen);
 end;
 
+function PMHashOf(AccountId: LongInt; const MapName: AnsiString): LongWord;
+begin
+  Result := Fnv1aLower(MapName) xor (LongWord(AccountId) * LongWord(2654435761));
+end;
+
+{ the place of the player-on-map record of this account and map in St.PlayerMaps, -1 for none }
+function PMFind(const St: TStoreState; const Ctx: TApplyCtx; AccountId: LongInt; const MapName: AnsiString): LongInt;
+var
+  Mask, h, v: LongInt;
+  P: PPlayerMapStats;
+begin
+  Result := -1;
+  if Length(Ctx.PMHash) = 0 then
+    Exit;
+  Mask := High(Ctx.PMHash);
+  h := LongInt(PMHashOf(AccountId, MapName) and LongWord(Mask));
+  while Ctx.PMHash[h] <> 0 do
+  begin
+    v := Ctx.PMHash[h] - 1;
+    P := St.PlayerMaps[v];
+    if (P <> nil) and (P^.AccountId = AccountId) and SameText(P^.MapName, MapName) then
+      Exit(v);
+    h := (h + 1) and Mask;
+  end;
+end;
+
+procedure PMHashPut(const St: TStoreState; var Ctx: TApplyCtx; Place: LongInt);
+var
+  Mask, h: LongInt;
+begin
+  Mask := High(Ctx.PMHash);
+  h := LongInt(PMHashOf(St.PlayerMaps[Place]^.AccountId, St.PlayerMaps[Place]^.MapName) and LongWord(Mask));
+  while Ctx.PMHash[h] <> 0 do
+    h := (h + 1) and Mask;
+  Ctx.PMHash[h] := Place + 1;
+  Inc(Ctx.PMUsed);
+end;
+
+{ the record at Place joins the hash; the hash stays at most half full (a power of two long), and
+  growing it leaves the removed places out }
+procedure PMHashAdd(const St: TStoreState; var Ctx: TApplyCtx; Place: LongInt);
+var
+  Old: TIdIndex;
+  NewLen, k: LongInt;
+begin
+  if (Length(Ctx.PMHash) = 0) or ((Ctx.PMUsed + 1) * 2 > Length(Ctx.PMHash)) then
+  begin
+    Old := Ctx.PMHash;
+    NewLen := Length(Old) * 2;
+    if NewLen < 1024 then
+      NewLen := 1024;
+    Ctx.PMHash := nil;
+    SetLength(Ctx.PMHash, NewLen);
+    Ctx.PMUsed := 0;
+    for k := 0 to High(Old) do
+      if (Old[k] > 0) and (St.PlayerMaps[Old[k] - 1] <> nil) then
+        PMHashPut(St, Ctx, Old[k] - 1);
+  end;
+  PMHashPut(St, Ctx, Place);
+end;
+
 function ApplyRecord(var St: TStoreState; var Ctx: TApplyCtx; RecType: Byte;
   const Payload: AnsiString): Boolean;
 var
   n, j, k, Id: LongInt;
   P: PPlayerProfile;
+  PM: PPlayerMapStats;
   A: TSeasonArchive;
   Meta: array[0..3] of LongWord;
 begin
@@ -601,6 +679,42 @@ begin
           end;
         end;
       end;
+
+    REC_PLAYERMAP:
+      begin
+        PM := NewPlayerMap;
+        if not DecodePlayerMap(Payload, PM^) or (PM^.AccountId <= 0) or (PM^.AccountId > MAX_STORE_ID) or
+           (Trim(PM^.MapName) = '') then
+        begin
+          FreePlayerMap(PM);
+          Exit(False);
+        end;
+        j := PMFind(St, Ctx, PM^.AccountId, PM^.MapName);
+        if j >= 0 then
+        begin
+          FreePlayerMap(St.PlayerMaps[j]);
+          St.PlayerMaps[j] := PM;
+        end
+        else
+        begin
+          if St.PlayerMapCount >= Length(St.PlayerMaps) then
+            SetLength(St.PlayerMaps, Length(St.PlayerMaps) + 1024 + Length(St.PlayerMaps) div 4);
+          St.PlayerMaps[St.PlayerMapCount] := PM;
+          PMHashAdd(St, Ctx, St.PlayerMapCount);
+          Inc(St.PlayerMapCount);
+        end;
+      end;
+
+    REC_DEL_PLAYERMAP:
+      begin
+        if Length(Payload) < 4 then
+          Exit(False);
+        Move(Payload[1], Id, 4);
+        j := PMFind(St, Ctx, Id, Copy(Payload, 5, MaxInt));
+        { nil marks a hole, compacted after loading }
+        if j >= 0 then
+          FreePlayerMap(St.PlayerMaps[j]);
+      end;
   end;
   { unknown record types come from newer builds and are skipped }
 end;
@@ -633,6 +747,18 @@ begin
       Inc(n);
     end;
   St.MapCount := n;
+  n := 0;
+  for i := 0 to St.PlayerMapCount - 1 do
+    if St.PlayerMaps[i] <> nil then
+    begin
+      if n <> i then
+      begin
+        St.PlayerMaps[n] := St.PlayerMaps[i];
+        St.PlayerMaps[i] := nil;
+      end;
+      Inc(n);
+    end;
+  St.PlayerMapCount := n;
 end;
 
 function LoadSnapshotData(const Data: AnsiString; var St: TStoreState; var Ctx: TApplyCtx;
@@ -757,6 +883,8 @@ begin
     ClearStoreState(St);
     Ctx.ProfileIdx := nil;
     Ctx.MapIdx := nil;
+    Ctx.PMHash := nil;
+    Ctx.PMUsed := 0;
     Info.SnapshotRecords := 0;
     Info.BadRecords := 0;
     if ReadWholeFile(Cand[i], Data) and LoadSnapshotData(Data, St, Ctx, Info, G) then
@@ -787,6 +915,8 @@ begin
     ClearStoreState(St);
     Ctx.ProfileIdx := nil;
     Ctx.MapIdx := nil;
+    Ctx.PMHash := nil;
+    Ctx.PMUsed := 0;
     Info.SnapshotRecords := 0;
     if AnySnapshot then
     begin
@@ -823,6 +953,7 @@ var
 begin
   ResetInfo(Info);
   ClearStoreState(St);
+  Ctx.PMUsed := 0;
   Result := ReadWholeFile(Path, Data) and LoadSnapshotData(Data, St, Ctx, Info, G);
   if Result then
   begin
@@ -1340,6 +1471,22 @@ begin
   AppendFrame(FJBuf, FJLen, REC_DEL_MAP, S);
 end;
 
+procedure TStoreWriter.JournalPlayerMap(const R: TPlayerMapStats);
+begin
+  AppendFrame(FJBuf, FJLen, REC_PLAYERMAP, EncodePlayerMap(R));
+end;
+
+procedure TStoreWriter.JournalDeletePlayerMap(AccountId: LongInt; const MapName: AnsiString);
+var
+  S: AnsiString;
+begin
+  SetLength(S, 4 + Length(MapName));
+  Move(AccountId, S[1], 4);
+  if MapName <> '' then
+    Move(MapName[1], S[5], Length(MapName));
+  AppendFrame(FJBuf, FJLen, REC_DEL_PLAYERMAP, S);
+end;
+
 procedure TStoreWriter.Flush;
 var
   Job: TStoreJob;
@@ -1423,6 +1570,16 @@ begin
   if not FSnapActive then
     Exit;
   AppendFrame(FSBuf, FSLen, REC_SEASON, EncodeSeason(A));
+  Inc(FSnapRecords);
+  if FSLen >= SNAPSHOT_CHUNK then
+    PushSnapshotChunk;
+end;
+
+procedure TStoreWriter.SnapshotPlayerMap(const R: TPlayerMapStats);
+begin
+  if not FSnapActive then
+    Exit;
+  AppendFrame(FSBuf, FSLen, REC_PLAYERMAP, EncodePlayerMap(R));
   Inc(FSnapRecords);
   if FSLen >= SNAPSHOT_CHUNK then
     PushSnapshotChunk;

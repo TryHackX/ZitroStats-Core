@@ -43,7 +43,7 @@ external {$IFDEF WIN32} 'ZS_Ev_Spawn@scripts/ZitroStats-Core/zitrostats_dll.dll 
 procedure ZS_Ev_Kill(Killer, Victim, BulletId, Weapon, Flags, VictimWeapon, Tick: Integer; KX, KY, VX, VY, BX, BY, VictimVest: Single);
 external {$IFDEF WIN32} 'ZS_Ev_Kill@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Ev_Kill@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
 
-procedure ZS_Ev_Damage(Shooter, Victim, BulletId, Weapon, Flags, Tick: Integer; Damage, VictimVest, BX, BY, BVX, BVY, VX, VY, VictimHealth: Single);
+procedure ZS_Ev_Damage(Shooter, Victim, BulletId, Weapon, Flags, Tick: Integer; Damage, VictimVest, BX, BY, BVX, BVY, VX, VY, VictimHealth, VictimVelX, VictimVelY, ShooterVelX, ShooterVelY: Single);
 external {$IFDEF WIN32} 'ZS_Ev_Damage@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Ev_Damage@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
 
 procedure ZS_Ev_Shot(Slot, Weapon, Count, Tick: Integer; X, Y: Single);
@@ -128,7 +128,7 @@ function ZS_Action_Text(): PChar;
 external {$IFDEF WIN32} 'ZS_Action_Text@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Action_Text@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
 
 const
-  ZS_API_VERSION = 14;
+  ZS_API_VERSION = 15;
 
   { command sources }
   SRC_CHAT = 0;
@@ -1684,8 +1684,10 @@ begin
     BVX := B.VelX;
     BVY := B.VelY;
   end;
+  { the velocities (pixels a tick): how fast the one who was hit moved, and the shooter's share of
+    his bullet's speed, for the flight of a shot the library did not see (a bot's) }
   ZS_Ev_Damage(Shooter.ID, Victim.ID, BulletId, Weapon, Flags, Game.TickCount, Damage, Victim.Vest,
-    BX, BY, BVX, BVY, Victim.X, Victim.Y, Victim.Health);
+    BX, BY, BVX, BVY, Victim.X, Victim.Y, Victim.Health, Victim.VelX, Victim.VelY, Shooter.VelX, Shooter.VelY);
 end;
 
 procedure HandleFlagGrab(Player: TActivePlayer; Flag: TActiveFlag; Team: Byte; GrabbedInBase: Boolean);
@@ -2044,7 +2046,7 @@ begin
 
   Game.TickThreshold := 1;
   Game.OnClockTick := @HandleClock;
-  WriteLn('[ZitroStats] 5.2 started, loading data in the background.');
+  WriteLn('[ZitroStats] 5.5 started, loading data in the background.');
 end;
 
 initialization

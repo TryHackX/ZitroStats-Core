@@ -21,6 +21,10 @@ type
   TTeamJoin = function(Slot, Team, OldTeam, Tick: LongInt): LongInt; cdecl;
   TTopCopy = function(Rank: LongInt; Buf: PChar; Size: LongInt): LongInt; cdecl;
   TMapList = procedure(Count, CurrentId, Reason, Tick: LongInt; Names: PChar); cdecl;
+  TDamage = procedure(Shooter, Victim, BulletId, Weapon, Flags, Tick: LongInt; Damage, VictimVest, BX, BY, BVX, BVY,
+    VX, VY, VictimHealth, VictimVelX, VictimVelY, ShooterVelX, ShooterVelY: Single); cdecl;
+  TKill = procedure(Killer, Victim, BulletId, Weapon, Flags, VictimWeapon, Tick: LongInt;
+    KX, KY, VX, VY, BX, BY, VictimVest: Single); cdecl;
 
 var
   Failures: Integer = 0;
@@ -87,6 +91,8 @@ var
   TeamJoin: TTeamJoin;
   TopCopy: TTopCopy;
   MapListEv: TMapList;
+  DamageEv: TDamage;
+  KillEv: TKill;
   T0: Int64;
   Kind, Lines, Ticks, InTick, MostInTick, n: LongInt;
   Help: Boolean;
@@ -163,6 +169,9 @@ begin
   TopCopy := TTopCopy(Sym(Lib, 'ZS_API_Top_Player_Copy'));
   { the maps list of the map vote }
   MapListEv := TMapList(Sym(Lib, 'ZS_Ev_Map_List'));
+  { a hit with the velocities of both players (API 15), and a kill }
+  DamageEv := TDamage(Sym(Lib, 'ZS_Ev_Damage'));
+  KillEv := TKill(Sym(Lib, 'ZS_Ev_Kill'));
   if Failures > 0 then
     Halt(Failures);
 
@@ -276,6 +285,18 @@ begin
   Help := WaitLine(2, 'Kits: Med', 5000, Txt);
   Check('the kits picked up land in the profile: ' + Trim(Txt), Help and
     (Txt = 'Kits: Med 1, Nade 0, Cluster 0, Vest 1, Berserk 0, Predator 0, Flamer 0'));
+
+  { a hit as main.pas sends it, with the velocities of both players: the AK bullet of Other reaches
+    Tester, who runs at 7 pixels a tick, and kills him. Nobody saw the shot, so the bullet tells
+    where it came from (~); Tester's !lastfight shows his speed at the hit, 30 m/s. }
+  DamageEv(2, 1, 5, WEP_AK74, EF_BULLET or EF_A_ALIVE, 200, 20, 0, 300, 100, -24, 0, 300, 100, 150, 7, 0, 0, 0);
+  KillEv(2, 1, 5, WEP_AK74, EF_BULLET or EF_A_ALIVE, WEP_AK74, 200, 600, 100, 300, 100, 300, 100, 0);
+  Sleep(1100);
+  Check('!lastfight is a ZitroStats command', Command(1, '!lastfight', SRC_CHAT, 0, 210) = 1);
+  { the line of the hit in the timeline, the only one with a speed }
+  Help := WaitLine(1, ' m/s', 5000, Txt);
+  Check('ZS_Ev_Damage: the victim''s velocity is his speed, the bullet tells the distance: ' + Trim(Txt),
+    Help and (Pos('killed you', Txt) > 0) and (Pos('30 m/s', Txt) > 0) and (Pos('~5 m', Txt) > 0));
 
   T0 := GetTickCount64;
   Shutdown();

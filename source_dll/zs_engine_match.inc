@@ -232,6 +232,7 @@ begin
   FillChar(Match.MaxDeficit, SizeOf(Match.MaxDeficit), 0);
   Match.TimeLeft := 0;
   Match.FirstBlood := False;
+  Match.RoundFirstBlood := False;
   Match.FirstDamage := False;
   FillChar(Match.LastStandGiven, SizeOf(Match.LastStandGiven), 0);
   Match.ClutchSlot := 0;
@@ -245,11 +246,15 @@ begin
   Match.LastVoteMap := '';
   Match.LastVoteTick := 0;
   Match.TotalSeconds := 0;
+  Match.CaptureTick := 0;
+  Match.RoundLive := False;
   M := Match.MapIndex;
   if M >= 0 then
   begin
     Inc(DB.Maps[M].LoadCount);
-    DB.Maps[M].LastPlayedTime := Now;
+    { the map runs, whoever plays; LastPlayedTime follows the seconds played with the statistics
+      on (SecondAccounting) }
+    DB.Maps[M].LastLoadedTime := Now;
     DB.TouchMap(M);
   end;
   LiveResetMatch(Live, GameTick);
@@ -310,6 +315,7 @@ begin
   { a map shorter than the check: the previous map's players are counted now }
   FinishStayCheck;
   StartStayCheck;
+  MxMapBefore(Self, E);
   for T := 1 to 4 do
     Match.TeamScore[T] := E.I[T - 1];
   Match.TimeLeft := E.I[4];
@@ -442,6 +448,7 @@ begin
         end;
         AddActivity(DB, Idx, Match.GameStyle, 0, 0, 0, 0, 1, 0, 0, 0);
       end;
+      MxMatchResult(Self, Idx, IsDraw, T = WinTeam, T);
       { the rating counts every team the player played for, by the share of the time spent there
         (a part under 5% is left out) }
       KeptTicks := 0;
@@ -488,6 +495,7 @@ begin
           TEAM_DELTA: Inc(P^.DeltaLoses);
         end;
         AddActivity(DB, Idx, Match.GameStyle, 0, 0, 0, 0, 1, 0, 0, 0);
+        MxMatchResult(Self, Idx, False, False, T, True);
         DB.Touch(Idx);
       end;
 
@@ -566,6 +574,7 @@ begin
       begin
         Inc(DB.Profiles[Players[k]]^.Draws);
         AddActivity(DB, Players[k], Match.GameStyle, 0, 0, 0, 0, 0, 1, 0, 0);
+        MxMatchResult(Self, Players[k], True, False);
         DB.Touch(Players[k]);
         AfterProfileChange(Players[k]);
       end;
@@ -588,6 +597,7 @@ begin
           Inc(P^.Loses);
           AddActivity(DB, Players[k], Match.GameStyle, 0, 0, 0, 0, 1, 0, 0, 0);
         end;
+        MxMatchResult(Self, Players[k], False, Teams[k] = BestSlot);
         DB.Touch(Players[k]);
         AfterProfileChange(Players[k]);
       end;
@@ -621,6 +631,8 @@ var
   P: PPlayerProfile;
   Opponents: Boolean;
 begin
+  { how the round ended, for the map (zs_engine_matrix.inc) }
+  MxRoundEnd(Self, WinTeam);
   { the server also hands a round to a team that plays alone: a round against nobody is none }
   Opponents := False;
   for S := 1 to MAX_PLAYERS do
@@ -672,6 +684,7 @@ begin
           TEAM_DELTA: Inc(P^.RoundsDeltaLoses);
         end;
       end;
+      MxRound(Self, Idx, T = WinTeam, S);
       if Match.Advance then
         Inc(P^.AdvanceRoundsPlayed);
       DB.Touch(Idx);
@@ -700,13 +713,14 @@ begin
   RoundReset;
 end;
 
-{ what belongs to one survival round: first blood, first damage and the last stands start again }
+{ what belongs to one survival round: the round's first blood, first damage and the last stands
+  start again; the first blood of the match stays given until the next match }
 procedure TZSEngine.RoundReset;
 begin
   Match.ClutchSlot := 0;
   Match.ClutchProfile := 0;
   FillChar(Match.LastStandGiven, SizeOf(Match.LastStandGiven), 0);
-  Match.FirstBlood := False;
+  Match.RoundFirstBlood := False;
   Match.FirstDamage := False;
 end;
 
@@ -811,9 +825,10 @@ end;
 
 { Free-for-all survival: the last one standing (WinSlot, 0 = nobody: the last ones died together,
   or a bot won) won the round, every other human who took part lost it. Only with at least two
-  humans in the round and the survival statistics on (MinHumansForSurvival). The winner is also
-  the last man standing (LastStand); a clutch - the last of a team winning against the odds - has
-  no meaning without teams. }
+  humans in the round and the survival statistics on (MinHumansForSurvival). With at least
+  [Mechanics] LastStandMinPlayers of them the winner is also the last man standing (LastStand): one
+  against one is a round won, no last stand. A clutch - the last of a team winning against the
+  odds - has no meaning without teams. }
 procedure TZSEngine.RoundEndFfa(WinSlot: LongInt);
 var
   S, Idx, Players: LongInt;
@@ -838,19 +853,26 @@ begin
         Inc(P^.RoundsWins);
         Inc(Live[S].SessionRoundWins);
         Inc(Live[S].MatchRoundWins);
-        Inc(P^.LastStand);
+        if Players >= Cfg.LastStandMinPlayers then
+        begin
+          Inc(P^.LastStand);
+          HudEvent(S, 'Last man standing!');
+        end;
         if Match.Advance then
           Inc(P^.AdvanceRoundsWon);
-        HudEvent(S, 'Last man standing!');
       end
       else
         Inc(P^.RoundsLose);
+      MxRound(Self, Idx, S = WinSlot);
+      if (S = WinSlot) and (Players >= Cfg.LastStandMinPlayers) then
+        MxLastStand(Self, Idx);
       if Match.Advance then
         Inc(P^.AdvanceRoundsPlayed);
       DB.Touch(Idx);
       if S = WinSlot then
         AfterProfileChange(Idx);
     end;
+    MxRoundEndFfa(Self, WinSlot);
     if Cfg.RoundWinBroadcast and (WinSlot > 0) then
       Broadcast('Round won by ' + Live[WinSlot].Name, CLR_MATCHES);
   end;
@@ -915,6 +937,8 @@ begin
           Match.RoundOver := True;
         end;
       end;
+      { a round with nobody left standing, for the map (zs_engine_matrix.inc) }
+      MxSurvivalTick(Self);
     end;
 
     { HTF points: credited to the human of the scoring team who carried the flag since the last look
@@ -941,6 +965,7 @@ begin
               Inc(P^.HTFMode.AlphaPointsScored, Delta)
             else
               Inc(P^.HTFMode.BravoPointsScored, Delta);
+            MxHtfPoints(Self, Idx, Delta);
           end;
           Inc(P^.HTFMode.TeamPointsScored, Delta);
           if T = TEAM_ALPHA then
@@ -965,6 +990,8 @@ begin
   UpdatePeakOnline;
   BalanceSecond;
   MapVoteSecond;
+  { !lastfight: the deaths whose seconds after them are over }
+  LastFightSecond(Self);
   for k := 1 to MAX_PLAYERS do
     if Live[k].Active and Live[k].Human then
     begin
@@ -982,6 +1009,8 @@ var
   Dow, Today: LongInt;
   TeamFlag: array[0..5] of Boolean;
   On, Survive: Boolean;
+  { [Matrix]: the counters of the player before the second counts }
+  MxS: TMxSnap;
 begin
   Humans := HumansPlaying;
   On := StatsOn;
@@ -1008,6 +1037,8 @@ begin
       Inc(DB.Maps[M].ActiveTimePlays);
       Inc(DB.Maps[M].HumansSampleSum, Humans);
       Inc(DB.Maps[M].HumansSampleCount);
+      { played with the statistics on (LastLoadedTime: the map ran at all) }
+      DB.Maps[M].LastPlayedTime := Now;
       DB.TouchMap(M);
     end;
     Inc(DB.Server.HourlyActivity[H], Humans);
@@ -1048,6 +1079,8 @@ begin
         Inc(DB.Server.Daily[D].NewPlayers);
     end;
     Inc(P^.TimePlayed);
+    MxSecond(Self, S, Idx);
+    MxSnap(Self, Idx, MxS);
     if Live[S].Alive then
     begin
       if Survive then
@@ -1098,6 +1131,7 @@ begin
       Inc(P^.TimeDeath);
     if Live[S].Flags and EF_A_FLAGGER = 0 then
       Live[S].ContestedSinceTick := 0;
+    MxSecondEnd(Self, S, MxS);
     AddActivity(DB, Idx, Match.GameStyle, 0, 0, 0, 0, 0, 0, 0, 1);
     NoteProtectionActivity(DB, Idx, Cfg);
     DB.Touch(Idx);

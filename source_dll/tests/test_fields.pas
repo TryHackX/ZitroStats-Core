@@ -332,6 +332,9 @@ begin
     if not FieldIs(ProfileFields, 651 + i, @P1, @P1.KitPickups[i], fkInt32, mkSum, True) then
       Ok := False;
   Check('kits picked up by kind (651-657): counters, added up on a merge, cleared by a reset', Ok);
+  Check('round first bloods (700): a counter apart from the first bloods of a match (361), added up on a merge, ' +
+    'cleared by a reset', FieldIs(ProfileFields, 700, @P1, @P1.RoundFirstBloodCount, fkInt32, mkSum, True) and
+    FieldIs(ProfileFields, 361, @P1, @P1.FirstBloodCount, fkInt32, mkSum, True));
   Check('the kinds of kit in the order of their ids', (KitKind(KIT_MEDICAL) = 0) and (KitKind(KIT_GRENADE) = 1) and
     (KitKind(KIT_CLUSTER) = 2) and (KitKind(KIT_VEST) = 3) and (KitKind(KIT_BERSERK) = 4) and (KitKind(KIT_PREDATOR) = 5) and
     (KitKind(KIT_FLAMER) = 6) and (KitKind(15) = -1) and (KitKind(23) = -1) and (KitKind(0) = -1));

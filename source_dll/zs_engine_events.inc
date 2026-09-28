@@ -264,6 +264,7 @@ begin
     WEP_FRAG: Inc(P^.NadesThrows, Count);
     WEP_CLUSTERNADE, WEP_CLUSTER: Inc(P^.ClusterNadesThrows, Count);
   end;
+  MxShots(Self, Idx, Weapon, N);
   DB.Touch(Idx);
 end;
 
@@ -353,6 +354,7 @@ begin
   if DB.Valid(Idx) then
   begin
     Inc(DB.Profiles[Idx]^.KitPickups[K]);
+    MxKit(Self, Idx, K);
     DB.Touch(Idx);
   end;
 end;
@@ -376,6 +378,7 @@ begin
       P^.HealKits := P^.HealKits + E.F[1];
     if E.I[0] > 0 then
       Inc(P^.HealKitCount, E.I[0]);
+    MxHeal(Self, Idx, E.F[0], E.F[1], E.I[0]);
     DB.Touch(Idx);
   end;
   M := Match.MapIndex;
@@ -393,6 +396,8 @@ var
   P: PPlayerProfile;
   MP: PMapProfile;
   Grew: Boolean;
+  { [Matrix]: the counters of the player before this sample }
+  MxS: TMxSnap;
 begin
   S := E.Slot;
   if not SlotValid(S) then
@@ -417,6 +422,7 @@ begin
   if not DB.Valid(Idx) then
     Exit;
   P := DB.Profiles[Idx];
+  MxSnap(Self, Idx, MxS);
   if Moved > 0 then
   begin
     P^.DistanceTraveledM := P^.DistanceTraveledM + Moved / PIXELS_PER_METER;
@@ -459,6 +465,7 @@ begin
     if Grew then
       DB.TouchMap(M);
   end;
+  MxSampleEnd(Self, S, MxS);
   DB.Touch(Idx);
 end;
 

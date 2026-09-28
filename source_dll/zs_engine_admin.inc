@@ -484,6 +484,8 @@ begin
           DB.InitRatings(P^);
           DB.Touch(i);
         end;
+        { what every player did on every map ([Matrix]) goes with it }
+        DB.PM.RemoveAll;
         DB.RebuildRanks;
         What := 'all player statistics were reset';
       end;
@@ -494,6 +496,7 @@ begin
           ResetMapStats(DB.Maps[i]);
           DB.TouchMap(i);
         end;
+        DB.PM.RemoveAll;
         What := 'all map statistics were reset';
       end;
     OP_RESET_PLAYER:
@@ -507,6 +510,7 @@ begin
           DB.InitRatings(P^);
           DB.Touch(Idx);
           DB.RefreshRanks(Idx);
+          DB.PM.RemoveRecordsOf(P^.ID);
           What := Format('statistics of #%d %s were reset', [P^.ID, P^.ActiveName]);
         end;
       end;
@@ -517,6 +521,7 @@ begin
         begin
           ResetMapStats(DB.Maps[Idx]);
           DB.TouchMap(Idx);
+          DB.PM.RemoveMap(DB.Maps[Idx].MapName);
           What := 'statistics of map ' + Pending.Arg + ' were reset';
         end;
       end;
@@ -914,7 +919,7 @@ end;
 
 procedure TZSEngine.RefreshHud(Slot: LongInt; Force: Boolean);
 var
-  Idx, k: LongInt;
+  Idx, k, n: LongInt;
   Text, Ev: AnsiString;
   A: TZSAction;
 begin
@@ -933,13 +938,27 @@ begin
       Extra[Slot].HudText := '';
     end;
     Extra[Slot].HudEvents := nil;
+    Extra[Slot].HudUntil := nil;
     Exit;
   end;
-  { every event since the last refresh on one line }
+  { the notes on one line: each stays [HUD] EventSeconds from the refresh that first shows it (a
+    refresh a second; half a second of slack keeps a late or early tick from adding or taking one) }
+  FitHudUntil(Extra[Slot]);
   Ev := '';
+  n := 0;
   for k := 0 to High(Extra[Slot].HudEvents) do
+  begin
+    if Extra[Slot].HudUntil[k] = 0 then
+      Extra[Slot].HudUntil[k] := GameTick + Max(1, Cfg.HudEventSeconds) * TICKS_PER_SECOND - TICKS_PER_SECOND div 2
+    else if GameTick >= Extra[Slot].HudUntil[k] then
+      Continue;
     Ev := Ev + '  ' + Extra[Slot].HudEvents[k];
-  Extra[Slot].HudEvents := nil;
+    Extra[Slot].HudEvents[n] := Extra[Slot].HudEvents[k];
+    Extra[Slot].HudUntil[n] := Extra[Slot].HudUntil[k];
+    Inc(n);
+  end;
+  SetLength(Extra[Slot].HudEvents, n);
+  SetLength(Extra[Slot].HudUntil, n);
   if Identity.Slots[Slot].Locked then
     Text := 'Not logged in - stats are not saved'
   else

@@ -1,7 +1,8 @@
 { zs_commands: player rankings, custom metric leaderboards and search }
 
 type
-  TMetricFmt = (mfInt, mfDec1, mfDec2, mfPct, mfTime, mfMeters, mfSec, mfTier, mfDmg);
+  { mfDate: a date (the day; 0 = never), newest first }
+  TMetricFmt = (mfInt, mfDec1, mfDec2, mfPct, mfTime, mfMeters, mfSec, mfTier, mfDmg, mfDate);
 
   TMetricDef = record
     Aliases: AnsiString;    { ' name alias ... ' }
@@ -18,7 +19,7 @@ const
   MET_WEAPON_DMG = 1400;
 
   { The position in this table is the metric id used by PlayerMetricValue. }
-  PLAYER_METRICS: array[0..166] of TMetricDef = (
+  PLAYER_METRICS: array[0..167] of TMetricDef = (
     (Aliases: ' points pts point '; Header: 'Points'; Fmt: mfInt; Asc: False),                      { 0 }
     (Aliases: ' rating rate '; Header: 'Rating'; Fmt: mfDec1; Asc: False),
     (Aliases: ' tier division '; Header: 'Tier'; Fmt: mfTier; Asc: False),
@@ -185,7 +186,8 @@ const
     (Aliases: ' vestkits '; Header: 'VestKits'; Fmt: mfInt; Asc: False),
     (Aliases: ' berserkkits berserkerkits '; Header: 'BerserkKits'; Fmt: mfInt; Asc: False),
     (Aliases: ' predatorkits '; Header: 'PredatorKits'; Fmt: mfInt; Asc: False),                     { 165 }
-    (Aliases: ' flamerkits '; Header: 'FlamerKits'; Fmt: mfInt; Asc: False)                          { 166 }
+    (Aliases: ' flamerkits '; Header: 'FlamerKits'; Fmt: mfInt; Asc: False),                         { 166 }
+    (Aliases: ' roundfirstblood rfb '; Header: 'RndFBlood'; Fmt: mfInt; Asc: False)                  { 167 }
   );
 
 var
@@ -322,6 +324,21 @@ begin
   Result := Heap;
 end;
 
+{ the keys of a row of a list sorted by one value, then a second and a third, the most first; Asc
+  turns the whole order round (PrepareSort(Rows, 2) first) }
+procedure SetSortKeys(Row: LongInt; V1, V2, V3: Double; Asc: Boolean);
+begin
+  if Asc then
+  begin
+    V1 := -V1;
+    V2 := -V2;
+    V3 := -V3;
+  end;
+  SortKeys[Row * 2] := V1;
+  SortKeys[Row * 2 + 1] := V2;
+  SortTie[Row] := V3;
+end;
+
 function SortValue(V: Double; Asc: Boolean): Double;
 begin
   if not Asc then
@@ -372,6 +389,7 @@ begin
         Result := FloatStr(V, 2) + 's'
       else
         Result := '-';
+    mfDate: Result := DateText(V, 'dd.mm.yy');
     { damage and counts are shortened like every other counter (Dmg, Num): 603 stays 603,
       15135 becomes 15.1k }
     else Result := Dmg(V);
@@ -743,6 +761,7 @@ begin
     159: Result := KitsPickedUp(P);
     { the kits of one kind, in the order of KIT_KIND_STYLES }
     160..166: Result := P.KitPickups[Id - 160];
+    167: Result := P.RoundFirstBloodCount;
     else Result := 0;
   end;
 end;
@@ -991,7 +1010,9 @@ begin
   Out(E, Slot, '  nadekits, clusterkits, vestkits, berserkkits, predatorkits, flamerkits', CLR_COMBAT);
   Out(E, Slot, '[Distance & Timing] longkill, barretkill, avgdist, long100, barrettlong, ttk, bestttk, longestlife', CLR_SHOOTING);
   Out(E, Slot, '[Streaks & Feats] maxstreak, streak5, streak10, streak15, streak20, streak25, shutdowns,', CLR_FEATS);
-  Out(E, Slot, '  finishers, firstblood, firstdmg, laststand, clutches, dom, revenge, posthumous, savior, avenger', CLR_FEATS);
+  Out(E, Slot, '  finishers, firstblood, roundfirstblood, firstdmg, laststand, clutches, dom, revenge, posthumous,',
+    CLR_FEATS);
+  Out(E, Slot, '  savior, avenger', CLR_FEATS);
   Out(E, Slot, '[Movement] prone, camp, bink, airkills, heightkills, vestkills, spawnkills, spawndeaths, flytime', CLR_MATCHES);
   Out(E, Slot, '[Objectives] caps, returns, grabs, drops, fkills, flagassist, fdefense, flagtime, killswithflag,', CLR_OBJECTIVE);
   Out(E, Slot, '  fastcap, fastcaps, escort, juggles, contested, htfpoints, htftime, htfteamtime', CLR_OBJECTIVE);

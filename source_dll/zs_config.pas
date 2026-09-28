@@ -217,6 +217,7 @@ type
     MaxHealth: LongInt;
     MaxHealthRealistic: LongInt;
     BaseRadiusMeters: LongInt;
+    LastStandMinPlayers: LongInt;   { humans in a survival round for a last stand: 1 against 1 is none }
 
     { identity & accounts }
     SteamAuthWaitSeconds: LongInt;
@@ -277,6 +278,7 @@ type
     HudScale: Single;
     HudColor: LongInt;
     HudRefreshSeconds: LongInt;
+    HudEventSeconds: LongInt;    { how long a note (points, first blood, a multi-kill ...) stays on the line }
     HudEnabled: Boolean;         { 0 = no HUD on this server }
     HudDefaultOn: Boolean;       { new accounts start with the HUD on }
 
@@ -295,6 +297,12 @@ type
     { commands }
     HeavyCooldownSeconds: LongInt;
     CommandsPerSecond: LongInt;
+
+    { [LastFight]: !lastfight and the lines after a death (zs_fight, zs_engine_fight.inc) }
+    LastFightEnabled: Boolean;
+    LastFightSummary: Boolean;         { DeathSummary }
+    LastFightBeforeSeconds: LongInt;   { what a record holds before the death }
+    LastFightAfterSeconds: LongInt;    { and after it: bullets still flying, the points of the death }
 
     { seasons & achievements }
     SeasonsEnabled: Boolean;
@@ -379,15 +387,21 @@ type
     IntegrityProtectMapChange: Boolean;
     IntegrityAnnounce: Boolean;
 
+    { [Matrix]: the player-on-map records (zs_matrix) and the weapon matchups of the maps }
+    MatrixEnabled: Boolean;            { off: none of it is recorded }
+    MatrixPruneDays: LongInt;          { the records of accounts not seen for this many days go; 0 = never }
+    MatrixPlayerHeatmap: Boolean;      { the heat cells of every player on every map }
+    MatrixMaxRivals: LongInt;          { rivals one record keeps at most }
+
     { map vote ([MapVote], zs_engine_mapvote.inc) }
     MapVoteEnabled: Boolean;
-    MapVotePercent: LongInt;           { of the players on the teams }
+    MapVotePercent: LongInt;           { of the players who may vote (MvEligible) }
     MapVoteSeconds: LongInt;
     MapVoteStarterCooldown: LongInt;   { seconds before the starter of a vote may start another }
     MapVoteMinTimeLeft: LongInt;       { seconds of the map a new vote needs }
     MapVoteBlockAfterChange: LongInt;  { seconds after a map change without new votes }
     MapVoteMinPlayers: LongInt;
-    MapVoteCountSpectators: Boolean;
+    MapVoteCountSpectators: Boolean;   { 0 = only the spectators who start the vote or vote for it count }
     MapVoteAllowAnyMap: Boolean;       { maps of the folder that are not in the maps list may be voted }
     MapVoteFilterByStyle: Boolean;     { ctf_/inf_/htf_ restrict !randommap and !allmaps to the style played }
     MapVoteMapsFolder: AnsiString;     { '' = the maps folder of the server }
@@ -705,6 +719,7 @@ begin
   C.MaxHealth := 150;
   C.MaxHealthRealistic := 65;
   C.BaseRadiusMeters := 30;
+  C.LastStandMinPlayers := 3;
 
   C.SteamAuthWaitSeconds := 8;
   C.NameHistoryLimit := 30;
@@ -761,6 +776,7 @@ begin
   C.HudScale := 0.02;
   C.HudColor := $F15D70;
   C.HudRefreshSeconds := 3;
+  C.HudEventSeconds := 2;
   C.HudEnabled := True;
   C.HudDefaultOn := False;
 
@@ -775,6 +791,11 @@ begin
 
   C.HeavyCooldownSeconds := 5;
   C.CommandsPerSecond := 2;
+
+  C.LastFightEnabled := True;
+  C.LastFightSummary := True;
+  C.LastFightBeforeSeconds := 10;
+  C.LastFightAfterSeconds := 4;
 
   C.SeasonsEnabled := True;
   C.SeasonLength := 'monthly';
@@ -848,6 +869,11 @@ begin
   C.IntegrityProtectMapChange := True;
   C.IntegrityAnnounce := True;
 
+  C.MatrixEnabled := True;
+  C.MatrixPruneDays := 90;
+  C.MatrixPlayerHeatmap := True;
+  C.MatrixMaxRivals := 200;
+
   C.MapVoteEnabled := True;
   C.MapVotePercent := 60;
   C.MapVoteSeconds := 20;
@@ -855,7 +881,7 @@ begin
   C.MapVoteMinTimeLeft := 26;
   C.MapVoteBlockAfterChange := 20;
   C.MapVoteMinPlayers := 1;
-  C.MapVoteCountSpectators := False;
+  C.MapVoteCountSpectators := True;
   C.MapVoteAllowAnyMap := True;
   C.MapVoteFilterByStyle := False;
   C.MapVoteMapsFolder := '';
@@ -1451,6 +1477,14 @@ begin
         else if Key = 'announce' then C.IntegrityAnnounce := BoolVal
         else Unknown;
       end
+      else if Section = 'matrix' then
+      begin
+        if Key = 'enabled' then C.MatrixEnabled := BoolVal
+        else if Key = 'matrixprunedays' then C.MatrixPruneDays := IntVal(90, 0, 3650)
+        else if Key = 'playerheatmap' then C.MatrixPlayerHeatmap := BoolVal
+        else if Key = 'maxrivals' then C.MatrixMaxRivals := IntVal(200, 1, 10000)
+        else Unknown;
+      end
       else if Section = 'mapvote' then
       begin
         if Key = 'enabled' then C.MapVoteEnabled := BoolVal
@@ -1615,6 +1649,7 @@ begin
         else if Key = 'steamauthwaitseconds' then C.SteamAuthWaitSeconds := IntVal(8, 0, 60) { [Identity] since 5.1 }
         else if Key = 'maxhealth' then C.MaxHealth := IntVal(150, 1, 10000)
         else if Key = 'maxhealthrealistic' then C.MaxHealthRealistic := IntVal(65, 0, 10000)
+        else if Key = 'laststandminplayers' then C.LastStandMinPlayers := IntVal(3, 2, 32)
         else Unknown;
       end
       else if Section = 'identity' then
@@ -1696,6 +1731,7 @@ begin
         else if Key = 'scale' then C.HudScale := FltVal(0.02, 0.001, 1)
         else if Key = 'color' then C.HudColor := ParseColor(Val, $F15D70)
         else if Key = 'refreshseconds' then C.HudRefreshSeconds := IntVal(3, 1, 60)
+        else if Key = 'eventseconds' then C.HudEventSeconds := IntVal(2, 1, 10)
         else if Key = 'enabled' then C.HudEnabled := BoolVal
         else if Key = 'defaulton' then C.HudDefaultOn := BoolVal
         else Unknown;
@@ -1716,6 +1752,14 @@ begin
       begin
         if Key = 'heavycooldownseconds' then C.HeavyCooldownSeconds := IntVal(5, 0, 600)
         else if Key = 'commandspersecond' then C.CommandsPerSecond := IntVal(2, 1, 50)
+        else Unknown;
+      end
+      else if Section = 'lastfight' then
+      begin
+        if Key = 'enabled' then C.LastFightEnabled := BoolVal
+        else if Key = 'deathsummary' then C.LastFightSummary := BoolVal
+        else if Key = 'beforeseconds' then C.LastFightBeforeSeconds := IntVal(10, 3, 20)
+        else if Key = 'afterseconds' then C.LastFightAfterSeconds := IntVal(4, 1, 8)
         else Unknown;
       end
       else if Section = 'seasons' then

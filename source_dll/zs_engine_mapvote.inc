@@ -3,8 +3,9 @@
   Players ask for a map with the commands (zs_cmd_mapvote.inc), with Soldat's vote menu and the
   server's /votemap (OnVoteMapStart: ZS_Ev_Vote kind 1; main.pas cancels Soldat's own vote) and vote
   with !v, F12 and /votemap <map> (the command, or OnVoteMap: kind 3). One vote runs at a time. It
-  passes once [MapVote] VotePercent % of the players on the teams (the spectators too with
-  CountSpectators = 1) voted for it, and fails after VoteSeconds. main.pas shows it to the clients as
+  passes once [MapVote] VotePercent % of the players on the teams and the spectators (with
+  CountSpectators = 0 only the spectators who started it or voted for it) voted for it, and fails
+  after VoteSeconds. main.pas shows it to the clients as
   Soldat's own vote (ACT_VOTE_START: Game.StartVoteMap with a vote percent of 200, so that Soldat
   never lets it pass by itself while F12 still works), puts the percent back once that vote is over
   (ACT_VOTE_END) and changes the map (ACT_MAP_CHANGE). The maps come from the maps list main.pas
@@ -59,11 +60,13 @@ begin
     Result := IntToStr(N) + ' ' + Many;
 end;
 
-{ a player who may vote: a human on a team, or a spectator with CountSpectators = 1 }
+{ a player the vote counts: a human on a team, a spectator with CountSpectators = 1, and with 0 a
+  spectator who started the vote or voted for it (a voter and a yes of that vote); every human
+  may vote }
 function TZSEngine.MvEligible(S: LongInt): Boolean;
 begin
   Result := (S >= 1) and (S <= MAX_PLAYERS) and Live[S].Active and Live[S].Human and not Live[S].PendingKick and
-    ((Live[S].Team <> TEAM_SPEC) or Cfg.MapVoteCountSpectators);
+    ((Live[S].Team <> TEAM_SPEC) or Cfg.MapVoteCountSpectators or MV.Voted[S]);
 end;
 
 procedure TZSEngine.MvCount(out Yes, Voters: LongInt);
@@ -321,12 +324,14 @@ begin
   Result := MV.PrevMap;
   if Result <> '' then
     Exit;
-  { no map change seen since the library started: the map the statistics saw played last }
+  { no map change seen since the library started: the map the statistics saw running last (loaded,
+    or played before LastLoadedTime was kept) }
   Cur := MapVoteCurrentMap;
   Best := -1;
   for k := 0 to DB.MapCount - 1 do
-    if (DB.Maps[k].LastPlayedTime > 0) and not SameText(DB.Maps[k].MapName, Cur) and
-       ((Best < 0) or (DB.Maps[k].LastPlayedTime > DB.Maps[Best].LastPlayedTime)) then
+    if (Max(DB.Maps[k].LastLoadedTime, DB.Maps[k].LastPlayedTime) > 0) and not SameText(DB.Maps[k].MapName, Cur) and
+       ((Best < 0) or (Max(DB.Maps[k].LastLoadedTime, DB.Maps[k].LastPlayedTime) >
+        Max(DB.Maps[Best].LastLoadedTime, DB.Maps[Best].LastPlayedTime))) then
       Best := k;
   if Best >= 0 then
     Result := DB.Maps[Best].MapName;
@@ -627,11 +632,9 @@ begin
     MvSayNoVote(Slot);
     Exit;
   end;
-  if not MvEligible(Slot) then
-  begin
-    Say(Slot, 'Spectators do not vote on this server: join a team first.', CLR_WARN);
+  { a player the server is kicking counts for nothing }
+  if Live[Slot].PendingKick then
     Exit;
-  end;
   MvCount(Yes, Voters);
   if MV.Voted[Slot] then
   begin
@@ -639,8 +642,9 @@ begin
       MapVoteSecondsLeft]), CLR_WARN);
     Exit;
   end;
+  { a spectator who votes joins the voters of this vote with CountSpectators = 0 }
   MV.Voted[Slot] := True;
-  Inc(Yes);
+  MvCount(Yes, Voters);
   Broadcast(Format('%s voted for %s (%s).', [Live[Slot].Name, MV.Target, MvCountText(Yes, Voters)]), CLR_HINT);
   if MvPasses(Yes, Voters) then
     MvPass(Format('%s won the vote (%d/%d).', [MV.Target, Yes, Voters]));
@@ -690,11 +694,9 @@ begin
       Exit;
     end;
   end;
-  if not MvEligible(Slot) then
-  begin
-    Say(Slot, 'Join a team to start a map vote.', CLR_WARN);
+  { a player the server is kicking counts for nothing }
+  if Live[Slot].PendingKick then
     Exit;
-  end;
   Left := MV.MapStartTick + Cfg.MapVoteBlockAfterChange * TICKS_PER_SECOND - GameTick;
   if Left > 0 then
   begin
@@ -725,13 +727,22 @@ begin
     Exit;
   end;
   MvCount(Yes, Voters);
+  { a spectator who starts the vote is one of its voters (CountSpectators = 0) }
+  Spec := '';
+  if not MvEligible(Slot) then
+  begin
+    Inc(Voters);
+    Spec := ': the players on the teams and you';
+  end;
   if Voters < Cfg.MapVoteMinPlayers then
   begin
-    if Cfg.MapVoteCountSpectators then
-      Spec := ''
+    if Spec <> '' then
+      Say(Slot, Format('A map vote needs %d players (%d now%s).', [Cfg.MapVoteMinPlayers, Voters, Spec]), CLR_WARN)
+    else if Cfg.MapVoteCountSpectators then
+      Say(Slot, Format('A map vote needs %d players (%d now).', [Cfg.MapVoteMinPlayers, Voters]), CLR_WARN)
     else
-      Spec := ' on the teams';
-    Say(Slot, Format('A map vote needs %d players%s (%d now).', [Cfg.MapVoteMinPlayers, Spec, Voters]), CLR_WARN);
+      Say(Slot, Format('A map vote needs %d players on the teams (%d now).', [Cfg.MapVoteMinPlayers, Voters]),
+        CLR_WARN);
     Exit;
   end;
   MvStart(Slot, Target, Key);

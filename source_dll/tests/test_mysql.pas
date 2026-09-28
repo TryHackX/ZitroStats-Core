@@ -6,13 +6,15 @@ program test_mysql;
     test_mysql <host> <port> <database> <user> <password>
 
   It works in its own server id (7777, and 7778 after a reload of the settings) and removes its
-  tables at the end. }
+  tables at the end. The player-on-map records ([Matrix]) go to zs_player_map_stats: written,
+  written again after a game, and a whole pass deletes the rows of records that are gone. }
 
 {$mode objfpc}{$H+}
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  SysUtils, Classes, base64, md5, zs_types, zs_util, zs_db, zs_fields, zs_weapons, zs_engine, zs_shared, mysqlwire;
+  SysUtils, Classes, base64, md5, zs_types, zs_util, zs_db, zs_fields, zs_weapons, zs_engine, zs_shared, zs_matrix,
+  mysqlwire;
 
 var
   Failures: Integer = 0;
@@ -202,6 +204,54 @@ begin
       Exit(True);
 end;
 
+{ [Matrix]: the number of the account of a name, -1 when there is none }
+function AccountNamed(const Name: AnsiString): LongInt;
+var
+  k: LongInt;
+begin
+  Result := -1;
+  EnterCriticalSection(Engine.StateLock);
+  try
+    for k := 0 to Engine.DB.ProfileCount - 1 do
+      if Engine.DB.Valid(k) and (Engine.DB.Profiles[k]^.ActiveName = Name) then
+        Result := Engine.DB.Profiles[k]^.ID;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+end;
+
+{ the record of an account on a map in memory as 'kills deaths points', '' when there is none }
+function RecordText(AccountId: LongInt; const Map: AnsiString): AnsiString;
+var
+  R: PPlayerMapStats;
+begin
+  Result := '';
+  EnterCriticalSection(Engine.StateLock);
+  try
+    R := Engine.DB.PM.Find(AccountId, Map);
+    if R <> nil then
+      Result := Format('%d %d %d', [R^.Kills, R^.Deaths, R^.Points]);
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+end;
+
+{ the same from the row of zs_player_map_stats, '' when there is none }
+function RowText(C: TMyConnection; ServerId, AccountId: LongInt; const Map: AnsiString): AnsiString;
+var
+  R: TMyResult;
+begin
+  Result := '';
+  R := C.Query(Format('SELECT CONCAT(kills, '' '', deaths, '' '', points) FROM zs_player_map_stats WHERE ' +
+    'server_id = %d AND account_id = %d AND map_name = %s', [ServerId, AccountId, MyStr(Map)]));
+  try
+    if R.RowCount > 0 then
+      Result := R.Str(0, 0);
+  finally
+    R.Free;
+  end;
+end;
+
 var
   Root: AnsiString;
   C: TMyConnection;
@@ -220,6 +270,11 @@ var
   BobIdx, ZbIdx, BobPlace, ZbPoints, ZbLocal: LongInt;
   BobLast, ZbLast: Double;
   OldIn, BobIn, ZbIn, AllIn: Boolean;
+  { [Matrix] }
+  ZbNo, BobNo: LongInt;
+  Mem, Row, BobRow: AnsiString;
+  QR: TMyResult;
+  Act: TZSAction;
 begin
   if ParamCount < 4 then
   begin
@@ -238,6 +293,7 @@ begin
     C.Exec('DROP TABLE IF EXISTS zs_players');
     C.Exec('DROP TABLE IF EXISTS zs_maps');
     C.Exec('DROP TABLE IF EXISTS zs_server');
+    C.Exec('DROP TABLE IF EXISTS zs_player_map_stats');
     C.Exec('CREATE TABLE zs_players (server_id INT NOT NULL, profile_id INT NOT NULL, name VARCHAR(64) NOT NULL, ' +
       'points INT NOT NULL, updated_at DATETIME NOT NULL, PRIMARY KEY (server_id, profile_id))');
     C.Exec('INSERT INTO zs_players VALUES (7777, 999, ''Gone'', 1000, ''2020-01-01 00:00:00'')');
@@ -292,6 +348,30 @@ begin
     Check('the map and the server rows', (Scalar(C, 'SELECT name FROM zs_maps WHERE server_id = 7777') = 'ctf_Ash') and
       (Scalar(C, 'SELECT accounts FROM zs_server WHERE server_id = 7777') = '2'));
 
+    { [Matrix]: the records of both players on ctf_Ash, as memory has them }
+    ZbNo := AccountNamed(Name);
+    BobNo := AccountNamed('Bob');
+    T0 := MonoMs;
+    repeat
+      Sleep(250);
+      Mem := RecordText(ZbNo, 'ctf_Ash');
+      try
+        Row := RowText(C, 7777, ZbNo, 'ctf_Ash');
+        BobRow := RowText(C, 7777, BobNo, 'ctf_Ash');
+      except
+        Row := '';
+        BobRow := '';
+      end;
+    until ((Mem <> '') and (Row = Mem) and (Pos('1 ', Row) = 1) and (BobRow = RecordText(BobNo, 'ctf_Ash'))) or
+      (MonoMs - T0 > 20000);
+    WriteLn('       zs_player_map_stats: ', Name, ' "', Row, '", Bob "', BobRow, '" (kills deaths points)');
+    Check('the records of every account on every map reach zs_player_map_stats', (Mem <> '') and (Row = Mem) and
+      (Pos('1 ', Row) = 1) and (BobRow <> '') and (BobRow = RecordText(BobNo, 'ctf_Ash')) and
+      (Scalar(C, 'SELECT COUNT(*) FROM zs_player_map_stats WHERE server_id = 7777') = '2'));
+    { a row of a record that is gone, and a row of another server }
+    C.Exec('INSERT INTO zs_player_map_stats (server_id, account_id, map_name, kills, updated_at) VALUES ' +
+      '(7777, 999, ''ctf_Gone'', 5, ''2020-01-01 00:00:00''), (8888, 1, ''ctf_Ash'', 3, ''2020-01-01 00:00:00'')');
+
     { a player who has been on the server for a long time: the time of the last game is only
       written at join and leave, and the next (partial) pass sends the new kill all the same }
     EnterCriticalSection(Engine.StateLock);
@@ -310,6 +390,15 @@ begin
       Got := Scalar(C, 'SELECT MAX(kills) FROM zs_players WHERE server_id = 7777');
     until (Got = '2') or (MonoMs - T0 > 20000);
     Check('a player on the server for long reaches the copy in the next partial pass', Got = '2');
+    { [Matrix]: the record played again is written again in a partial pass }
+    T0 := MonoMs;
+    repeat
+      Sleep(250);
+      Mem := RecordText(ZbNo, 'ctf_Ash');
+      Row := RowText(C, 7777, ZbNo, 'ctf_Ash');
+    until ((Pos('2 ', Mem) = 1) and (Row = Mem)) or (MonoMs - T0 > 20000);
+    Check('a record played again is written again in the next partial pass', (Pos('2 ', Mem) = 1) and (Row = Mem) and
+      (Scalar(C, 'SELECT COUNT(*) FROM zs_player_map_stats WHERE server_id = 7777 AND account_id = 999') = '1'));
 
     { Another server of this database (8888) wrote what it shares: the same Steam account with 5
       kills there, a Steam player who never played here, the map ctf_Ash with 7 kills, and its
@@ -571,6 +660,57 @@ begin
       Rows := StrToIntDef(Scalar(C, 'SELECT COUNT(*) FROM zs_players WHERE server_id = 7778'), 0);
     until (Rows >= 3) or (MonoMs - T0 > 20000);
     Check('a reload with another ServerID moves the copy to it', Rows >= 3);
+
+    { [Matrix]: the records went along; then Bob's records go here (a reset of his statistics), and
+      the whole pass of the copy that starts again under 7777 deletes the rows of the records that
+      are gone - Bob's and the one inserted by hand - and leaves the other server's row alone }
+    T0 := MonoMs;
+    repeat
+      Sleep(250);
+      Row := Scalar(C, 'SELECT COUNT(*) FROM zs_player_map_stats WHERE server_id = 7778');
+    until (StrToIntDef(Row, 0) >= 3) or (MonoMs - T0 > 20000);
+    Check('the records went along to the other ServerID', StrToIntDef(Row, 0) >= 3);
+    EnterCriticalSection(Engine.StateLock);
+    try
+      Engine.DB.PM.RemoveRecordsOf(BobNo);
+    finally
+      LeaveCriticalSection(Engine.StateLock);
+    end;
+    Check('Bob had a row before', RowText(C, 7777, BobNo, 'ctf_Ash') <> '');
+    WriteSettings(Root, 7777);
+    Push(NewEvent(zeReloadConfig));
+    T0 := MonoMs;
+    repeat
+      Sleep(250);
+      Rows := StrToIntDef(Scalar(C, 'SELECT COUNT(*) FROM zs_player_map_stats WHERE server_id = 7777 AND ' +
+        '(account_id = 999 OR account_id = ' + IntToStr(BobNo) + ')'), -1);
+      Mem := RecordText(ZbNo, 'ctf_Ash');
+      Row := RowText(C, 7777, ZbNo, 'ctf_Ash');
+    until ((Rows = 0) and (Row = Mem) and (Mem <> '')) or (MonoMs - T0 > 20000);
+    WriteLn('       after the whole pass: ', Rows, ' row(s) of records that are gone, ', Name, ' "', Row, '"');
+    if Rows <> 0 then
+    begin
+      { what is left, and what the copy said }
+      QR := C.Query('SELECT account_id, map_name, updated_at FROM zs_player_map_stats WHERE server_id = 7777');
+      try
+        for k := 0 to QR.RowCount - 1 do
+          WriteLn('       left: #', QR.Str(k, 0), ' ', QR.Str(k, 1), ' ', QR.Str(k, 2));
+      finally
+        QR.Free;
+      end;
+      while Engine.PopAction(Act) do
+        if Pos('MySQL', Act.Text) > 0 then
+          WriteLn('       console: ', Act.Text);
+    end;
+    Check('the whole pass deletes the rows of records that are gone, and writes the others', (Rows = 0) and
+      (Mem <> '') and (Row = Mem) and (RowText(C, 7777, BobNo, 'ctf_Ash') = ''));
+    Check('the rows of another server stay', Scalar(C, 'SELECT kills FROM zs_player_map_stats WHERE server_id = 8888 ' +
+      'AND account_id = 1') = '3');
+    { the whole pass after the restart of the copy may come within the second of the last pass
+      before it: every pass writes a later second, or that pass would keep the rows of that second }
+    Check('every pass of the copy writes a later time than the passes before it, also after a restart',
+      Scalar(C, 'SELECT (SELECT MIN(updated_at) FROM zs_player_map_stats WHERE server_id = 7777) > ' +
+        '(SELECT MAX(updated_at) FROM zs_player_map_stats WHERE server_id = 7778)') = '1');
   finally
     C.Free;
   end;
@@ -584,6 +724,7 @@ begin
     C.Exec('DROP TABLE IF EXISTS zs_players');
     C.Exec('DROP TABLE IF EXISTS zs_maps');
     C.Exec('DROP TABLE IF EXISTS zs_server');
+    C.Exec('DROP TABLE IF EXISTS zs_player_map_stats');
   finally
     C.Free;
   end;

@@ -228,6 +228,7 @@ begin
     KI('avg_kill_dist_px', WholeOf(SafeDivD(P^.TotalKillDistance, P^.KillDistanceCount) * PIXELS_PER_METER)) + ', ' +
     KF('damage_dealt', P^.DamageDealt, 0) + ', ' + KF('damage_received', P^.DamageReceived, 0) + ', ' +
     KF('damage_ratio', SafeDivD(P^.DamageDealt, P^.DamageReceived), 2) + ', ' + KI('first_bloods', P^.FirstBloodCount) + ', ' +
+    KI('round_first_bloods', P^.RoundFirstBloodCount) + ', ' +
     KI('first_damage', P^.FirstDamageCount) + ', ' +
     KF('longest_kill_m', P^.LongestKillDistance, 1) + ', ' + KF('longest_barrett_m', P^.LongestBarrettDistance, 1) + ', ' +
     KF('avg_kill_dist_m', SafeDivD(P^.TotalKillDistance, P^.KillDistanceCount), 1) + ', ' + KI('wins', P^.Wins) + ', ' +
@@ -421,7 +422,8 @@ begin
     KI('best_streak', P^.MaxKillStreak) + ', ' + KF('longest_kill_m', P^.LongestKillDistance, 1) + ', ' +
     KF('avg_kill_dist_m', SafeDivD(P^.TotalKillDistance, P^.KillDistanceCount), 1) + ', ' +
     KF('avg_ttk_sec', SafeDivD(P^.TTKSumTicks, P^.TTKCount) / TICKS_PER_SECOND, 2) + ', ' + KI('longest_life_sec', P^.LongestLifeSec) + ', ' +
-    KI('first_bloods', P^.FirstBloodCount) + ', ' + KI('multi_kills', P^.PointmatchMode.Multi.MULTI_KILL) + ', ' +
+    KI('first_bloods', P^.FirstBloodCount) + ', ' + KI('round_first_bloods', P^.RoundFirstBloodCount) + ', ' +
+    KI('multi_kills', P^.PointmatchMode.Multi.MULTI_KILL) + ', ' +
     KI('knife_kills', P^.Weapons[WEP_KNIFE].Kills) + ', ' + KI('grenade_kills', P^.GrenadeKills) + ', ' +
     KF('traveled_km', P^.DistanceTraveledM / 1000, 2) + ', ' + KI('days_played', P^.DaysPlayed) + ', ' +
     KI('protection_days', P^.ProtectionDays) + ', ' + KI('season', P^.SeasonId) + ', ' + KI('season_points', P^.SeasonPoints) + ', ' +

@@ -8,8 +8,8 @@ uses
   SysUtils, Classes;
 
 const
-  ZS_VERSION_STR = '5.2';
-  ZS_API_VERSION = 14;
+  ZS_VERSION_STR = '5.5';
+  ZS_API_VERSION = 15;
   ZS_DB_FORMAT = 9;
 
   MAX_PLAYERS = 32;
@@ -280,6 +280,15 @@ type
     ReloadDoneMille: Int64;      { how far each of those got, per mille (finished = 1000) }
     ReloadDeathMille: Int64;     { how far the ones cut short by death got }
     ReloadTicksAll: Int64;       { all the time spent reloading }
+    { the kills of this account with the weapon as TWeaponGlobal keeps them for the server: by
+      distance (under 10, 25, 50, 100 m and more), the distances added up, the time from the first
+      hit to the kill (ticks) and the kills of a victim wearing a vest }
+    DistBucket: array[0..4] of LongInt;
+    KillDistSum: Double;
+    KillDistCount: LongInt;
+    TTKSumTicks: Int64;
+    TTKCount: LongInt;
+    VestKills: LongInt;
   end;
   TWeaponsArray = array[0..WSLOT_COUNT - 1] of TWeaponStats;
   PWeaponStats = ^TWeaponStats;
@@ -582,6 +591,7 @@ type
     KillDistanceCount: Int64;
     FirstBloodCount: LongInt;
     FirstDamageCount: LongInt;
+    RoundFirstBloodCount: LongInt; { the first kill of a survival round; FirstBloodCount: of a match }
     DamageDealt: Double;
     DamageReceived: Double;
     DamageFriendly: Double;
@@ -690,6 +700,15 @@ type
   end;
   THeatCellArray = array of THeatCell;
 
+  { a weapon against a weapon on one map: the kills made with the weapon slot Killer against a
+    player who held the weapon slot Victim (TMapProfile.Matchups, sorted by Killer, then Victim) }
+  TMatchupCell = record
+    Killer: LongInt;
+    Victim: LongInt;
+    Kills: LongInt;
+  end;
+  TMatchupCellArray = array of TMatchupCell;
+
   TMapProfile = record
     ID: LongInt;
     MapName: AnsiString;
@@ -749,6 +768,21 @@ type
     WeaponPicksTeam: array[1..2, 0..WSLOT_COUNT - 1] of LongInt;  { picks of Alpha and Bravo players }
     MinX, MinY, MaxX, MaxY: Single;
     Heat: THeatCellArray;
+    { the last time the map ran at all, with any players (LastPlayedTime: the last second played
+      with the statistics on) }
+    LastLoadedTime: Double;
+    { how the survival rounds of the map ended, counted like the round wins: won by wiping out the
+      other teams (by the team that won), won by the last one standing (free-for-all), won by a
+      capture (Capture the Flag, Infiltration), nobody left standing, cut short by the map change }
+    RoundsElimination: array[1..4] of LongInt;
+    RoundsLastStanding: LongInt;
+    RoundsCapture: LongInt;
+    RoundsNoSurvivor: LongInt;
+    RoundsMapChange: LongInt;
+    { team games: the kills made by the players of each team, the kill balance of the map }
+    KillsByTeam: array[1..4] of LongInt;
+    { the weapon matchups of the map ([Matrix]): kills made with one weapon against another }
+    Matchups: TMatchupCellArray;
     Dirty: Boolean;
     { Engine = mysql (zs_sqldb): the record as the shared database last had it, its version
       there, and whether it waits for the next exchange with it }
@@ -758,6 +792,158 @@ type
   end;
   PMapProfile = ^TMapProfile;
   TMapProfileArray = array of TMapProfile;
+
+  { The player-on-map records ([Matrix], zs_matrix): what one account did on one map, keyed by the
+    account id and the map NAME. A record is made at the first event counted for the account on
+    the map; its lists hold only what happened (sparse), each sorted by its key. }
+
+  { one weapon of the account on the map }
+  TPMWeapon = record
+    Slot: LongInt;            { weapon slot, 0 .. WSLOT_COUNT - 1 }
+    Kills: LongInt;
+    Deaths: LongInt;          { deaths by this weapon }
+    Shots: LongInt;
+    Hits: LongInt;            { hits on enemies }
+    Headshots: LongInt;
+    Damage: Double;           { dealt to enemies }
+    TimeUsed: LongInt;        { seconds alive with it in hand }
+  end;
+  PPMWeapon = ^TPMWeapon;
+  TPMWeaponArray = array of TPMWeapon;
+
+  { an opponent of the account on the map }
+  TPMRival = record
+    Id: LongInt;              { the opponent's account id }
+    Kills: LongInt;           { the account killed him }
+    Deaths: LongInt;          { he killed the account }
+    DamageDealt: Single;      { to him }
+    DamageTaken: Single;      { from him }
+    LastFight: Double;        { the last kill or hit between the two }
+    { the points the account won from him (its kills of him as they paid it, and with [Ranking]
+      SelfkillMode = zerosum his selfkills under its fire) and the points it lost to him (the same
+      the other way round) }
+    PointsWon: LongInt;
+    PointsLost: LongInt;
+  end;
+  PPMRival = ^TPMRival;
+  TPMRivalArray = array of TPMRival;
+
+  { the account's weapon against the opponent's weapon }
+  TPMMatchup = record
+    Mine: LongInt;            { weapon slot of the account }
+    Theirs: LongInt;          { weapon slot the opponent held }
+    Wins: LongInt;            { the account killed him }
+    Losses: LongInt;          { he killed the account }
+  end;
+  PPMMatchup = ^TPMMatchup;
+  TPMMatchupArray = array of TPMMatchup;
+
+  TPlayerMapStats = record
+    AccountId: LongInt;
+    MapName: AnsiString;
+    FirstPlayed: Double;
+    LastPlayed: Double;
+    TimePlayed: Int64;        { seconds played with the statistics on, not as a spectator }
+    Matches: LongInt;         { matches of the map the account played in }
+    Wins: LongInt;
+    Losses: LongInt;
+    Draws: LongInt;
+    RoundsWon: LongInt;
+    RoundsLost: LongInt;
+    Kills: LongInt;
+    Deaths: LongInt;
+    Selfkills: LongInt;
+    Teamkills: LongInt;
+    Assists: LongInt;
+    Points: LongInt;          { points won minus points lost on the map }
+    Caps: LongInt;
+    Returns: LongInt;
+    Grabs: LongInt;
+    Shots: LongInt;
+    Hits: LongInt;
+    HitsHead: LongInt;
+    HitsBody: LongInt;
+    HitsLegs: LongInt;
+    DamageDealt: Double;
+    DamageReceived: Double;
+    HealRegen: Double;
+    BestStreak: LongInt;
+    FirstBloods: LongInt;     { the first kill of a match }
+    RoundFirstBloods: LongInt; { the first kill of a survival round }
+    LastStands: LongInt;
+    LongestKill: Single;      { metres }
+    { what else the account's own statistics count, counted the same way on the map: the sums add
+      what an event added to the account's counter (zs_engine_matrix.inc), a best is the best of
+      the map. The field ids are in zs_fields (RegisterMatrixFields). }
+    { lives, time and movement }
+    TimeAlive: Int64;         { seconds alive while the survival statistics counted }
+    LongestLife: LongInt;     { seconds, the longest life }
+    TeamkillDeaths: LongInt;  { killed by a teammate }
+    Traveled: Double;         { metres }
+    BestLifeDistance: Single; { metres covered in one life, the most }
+    JetTime: Int64;           { seconds of flight }
+    { damage, hits and healing }
+    DamageFriendly: Double;
+    DamageFriendlyReceived: Double;
+    HitsUnknown: LongInt;     { bullets whose zone was not clear }
+    FriendlyHits, FriendlyHitsHead, FriendlyHitsBody, FriendlyHitsLegs: LongInt;
+    HitsByFriendly: LongInt;
+    SelfHits: LongInt;
+    FirstDamages: LongInt;    { the first hit of a match or a survival round }
+    HealKits: Double;         { health from medical, berserker and predator kits }
+    HealKitCount: LongInt;
+    KitPickups: array[0..KIT_KINDS - 1] of LongInt;   { by kind (KIT_KIND_STYLES) }
+    { kills }
+    PosthumousKills, RevengeKills, AvengerKills, SaviorKills: LongInt;
+    Dominations, DominationsEnded, ShutDowns, Finishers: LongInt;
+    GrenadeKills, ExplosionMultiKills, WallKills, CoverShotKills: LongInt;
+    BinkRecoveryKills, ProneKills, AirKills, HeightKills, CampKills, VestKills: LongInt;
+    SpawnKills, SpawnDeaths, LongKills100, BarrettLongKills: LongInt;
+    LongestBarrett: Single;   { metres }
+    KillDistSum: Double;      { metres, the kills whose distance is known (KillDistCount) }
+    KillDistCount: Int64;
+    TTKSumTicks: Int64;       { from the first hit to the kill }
+    TTKCount: LongInt;
+    BestTTKTicks: LongInt;    { the fastest, 0 = none }
+    KnifeStreak: LongInt;     { knife kills in one life, the most }
+    ForcedSelfkills: LongInt; { enemies who killed themselves under this player's fire }
+    SelfkillsUnderFire: LongInt;
+    BaseDefenseKills, BaseAttackKills: LongInt;
+    { the multi-kill medals }
+    DoubleKills, TripleKills, MultiKills, MultiKillsX2, SerialKills, InsaneKills, GimmeMore, MastaKilla,
+      StopIt: LongInt;
+    { flags }
+    FlagDrops, FlagThrows, FlaggerKills, FlaggerAssists, FlagDefenses, KillsWithFlag: LongInt;
+    FlaggerTeamkills, TeamkillsWithFlag: LongInt;
+    FlagHoldTime: LongInt;    { seconds }
+    FastestCap: Single;       { seconds, 0 = none }
+    CapsUnder10s, EscortKills, FlagJuggles, ContestedHolds: LongInt;
+    HtfPoints: LongInt;
+    HtfHoldTime, HtfTeamHoldTime: Int64;   { seconds with the flag, and with it in the team }
+    { matches and rounds }
+    LeaveLosses, AlphaWins, AlphaLosses, BravoWins, BravoLosses, ComebackWins: LongInt;
+    ClutchesWon, AdvanceRoundsWon, AdvanceRoundsPlayed: LongInt;
+    { the special weapons (their shots and hits on enemies are in Weapons) }
+    KnifeThrows, KnifeThrowHits, KnifeStabs, NadeSelfHits: LongInt;
+    BowKills, RamboKills: LongInt;
+    BowTime: Int64;           { seconds }
+    Weapons: TPMWeaponArray;      { by Slot }
+    Rivals: TPMRivalArray;        { by Id }
+    Matchups: TPMMatchupArray;    { by Mine, then Theirs }
+    Heat: THeatCellArray;         { by Cell: the cells of the map heatmap, kills and deaths }
+    { runtime only }
+    Dirty: Boolean;
+    MapNo: LongInt;           { the number of the map in the table (TPlayerMapTable) }
+    MapPos, AccPos: LongInt;  { where the table lists the record under its map and its account }
+    MatchKey: Double;         { the start of the last match counted in Matches }
+    { Engine = mysql (zs_sqldb): the record as the shared database last had it ('' = not there
+      yet), its version there, and whether it waits for the next exchange with it }
+    SyncBase: AnsiString;
+    SyncVersion: Int64;
+    SyncDirty: Boolean;
+  end;
+  PPlayerMapStats = ^TPlayerMapStats;
+  TPlayerMapPtrArray = array of PPlayerMapStats;
 
   TWeaponGlobal = record
     DistBucket: array[0..4] of Int64;
@@ -872,7 +1058,7 @@ type
     Serial: LongWord;
     Serial2: LongWord;
     I: array[0..7] of LongInt;
-    F: array[0..11] of Single;
+    F: array[0..15] of Single;
     S1, S2, S3, S4: AnsiString;
   end;
   TZSEventArray = array of TZSEvent;

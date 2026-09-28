@@ -48,6 +48,7 @@ type
     CheckWaitDays: LongInt; { how long the surplus has been waiting }
     Total: Int64;
     Expected: Int64;
+    MatrixPruned: LongInt;  { player-on-map records removed ([Matrix] MatrixPruneDays) }
   end;
 
 var
@@ -660,6 +661,10 @@ begin
       DB.TouchServer;
     end;
   end;
+
+  { [Matrix]: the records of every map of accounts that have not played for MatrixPruneDays go }
+  if Cfg.MatrixPruneDays > 0 then
+    Rep.MatrixPruned := DB.PrunePlayerMaps(Cfg.MatrixPruneDays);
 end;
 
 { ---------------- leagues ---------------- }

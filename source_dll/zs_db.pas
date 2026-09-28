@@ -12,7 +12,7 @@ unit zs_db;
 interface
 
 uses
-  SysUtils, zs_types, zs_util, zs_fields, zs_store, zs_rank, zs_rating, zs_legacy;
+  SysUtils, zs_types, zs_util, zs_fields, zs_store, zs_rank, zs_rating, zs_legacy, zs_matrix;
 
 const
   RANK_POINTS = 0;
@@ -66,6 +66,9 @@ type
     procedure IndexProfile(Index: LongInt);
     procedure UnindexProfile(Index: LongInt);
     function RankKey(List: LongInt; const P: TPlayerProfile; out Include: Boolean): Int64;
+    function PMSyncState: LongInt;
+    function AccountLastPlayed(AccountId: LongInt): Double;
+    function AccountExists(AccountId: LongInt): Double;
   public
     Server: TServerRecords;
     Profiles: TProfilePtrArray;
@@ -74,6 +77,8 @@ type
     MapCount: LongInt;
     Seasons: TSeasonArchiveArray;
     Ranks: array[0..RANK_COUNT - 1] of TRankList;
+    { the player-on-map records ([Matrix], zs_matrix): the API of the views is described there }
+    PM: TPlayerMapTable;
 
     { Engine = mysql: every change is also remembered for the exchange with the shared database
       (zs_sqldb), and the numbers of new accounts come from it }
@@ -126,6 +131,9 @@ type
     procedure RefreshRanks(Index: LongInt);
     procedure RebuildRanks;
     procedure RebuildIndexes;
+    { [Matrix] MatrixPruneDays: the player-on-map records of accounts that have not played for Days
+      days go (0 = none); returns how many }
+    function PrunePlayerMaps(Days: LongInt): LongInt;
 
     { the exchange with the shared database: what changed since the last one (the lists are
       emptied), changes of the database that must not be sent back, accounts and maps it brought }
@@ -190,6 +198,8 @@ begin
   FMapName := TStrIndex.Create(256);
   for k := 0 to RANK_COUNT - 1 do
     Ranks[k] := TRankList.Create;
+  PM := TPlayerMapTable.Create;
+  PM.SyncState := @PMSyncState;
   GlickoK := 2;
   MmrStart := 1500;
   MmrK := 24;
@@ -213,6 +223,7 @@ begin
   FMapName.Free;
   for k := 0 to RANK_COUNT - 1 do
     Ranks[k].Free;
+  PM.Free;
   inherited Destroy;
 end;
 
@@ -246,6 +257,7 @@ begin
   FSyncServer := False;
   FSyncSeasons := nil;
   FSyncDeletedCount := 0;
+  PM.Clear;
   Inc(FIndexGen);
 end;
 
@@ -295,6 +307,9 @@ begin
     Server.NextMapID := MaxId + 1;
   RebuildIndexes;
   RebuildRanks;
+  { the player-on-map records; those of accounts that are not there any more go }
+  PM.TakeState(St);
+  PM.DropOrphans(@AccountExists);
   { 5.0 summed the match lengths without counting the matches, and a map imported from 4.x counts
     old matches that have no length at all. That old sum is set aside once, so the average match
     length starts with the first match played by 5.1. }
@@ -480,6 +495,42 @@ begin
   Result := ProfileCount - FHoles;
 end;
 
+{ a change of the player-on-map records goes to the shared database (Engine = mysql) when made
+  here; one it brought changes the base as well }
+function TStatsDB.PMSyncState: LongInt;
+begin
+  if not SyncOn then
+    Result := PMS_OFF
+  else if FSyncQuiet > 0 then
+    Result := PMS_REMOTE
+  else
+    Result := PMS_LOCAL;
+end;
+
+function TStatsDB.AccountLastPlayed(AccountId: LongInt): Double;
+var
+  i: LongInt;
+begin
+  i := IndexOfId(AccountId);
+  if Valid(i) then
+    Result := Profiles[i]^.LastPlayedTime
+  else
+    Result := 0;
+end;
+
+function TStatsDB.AccountExists(AccountId: LongInt): Double;
+begin
+  if Valid(IndexOfId(AccountId)) then
+    Result := 1
+  else
+    Result := 0;
+end;
+
+function TStatsDB.PrunePlayerMaps(Days: LongInt): LongInt;
+begin
+  Result := PM.Prune(Days, FNow, @AccountLastPlayed);
+end;
+
 { ---------------- changes ---------------- }
 
 procedure TStatsDB.InitRatings(var P: TPlayerProfile);
@@ -639,6 +690,8 @@ begin
       SetLength(FDeleted, Length(FDeleted) * 2 + 16);
     FDeleted[FDeletedCount] := Profiles[Index]^.ID;
     Inc(FDeletedCount);
+    { its records on the maps, and the rival entries that name it, follow it }
+    PM.RenumberAccount(Profiles[Index]^.ID, NewId);
   end;
   Profiles[Index]^.ID := NewId;
   SetIdIndex(NewId, Index);
@@ -843,6 +896,9 @@ begin
     FSyncDeleted[FSyncDeletedCount].MergedInto := Profiles[Index]^.MergedInto;
     Inc(FSyncDeletedCount);
   end;
+  { its records on the maps go, and so do the rival entries that name it (at EndBulkDelete when
+    many accounts go at once) }
+  PM.RemoveAccount(Profiles[Index]^.ID, FSyncQuiet > 0, FBulkDelete);
   FreeProfile(Profiles[Index]);
   Inc(FHoles);
 end;
@@ -851,6 +907,8 @@ procedure TStatsDB.MergeProfile(DstIndex, SrcIndex, StartingPoints: LongInt);
 begin
   if (DstIndex = SrcIndex) or not Valid(DstIndex) or not Valid(SrcIndex) then
     Exit;
+  { the records of the maps are added up map by map, the rival entries follow }
+  PM.MergeAccount(Profiles[SrcIndex]^.ID, Profiles[DstIndex]^.ID, FSyncQuiet > 0);
   UnindexProfile(SrcIndex);
   MergeProfileInto(Profiles[DstIndex]^, Profiles[SrcIndex]^, StartingPoints);
   IndexProfile(DstIndex);
@@ -931,6 +989,7 @@ begin
   if not FBulkDelete then
     Exit;
   FBulkDelete := False;
+  PM.FlushRivalRemovals(FSyncQuiet > 0);
   RebuildRanks;
 end;
 
@@ -999,6 +1058,9 @@ begin
       FServerDirty := False;
     end;
   end;
+  { the player-on-map records go with the maps; a removal (a merge, a reset) at once }
+  if IncludeShared or PM.PendingRemovals then
+    PM.FlushJournal(W);
   W.Flush;
 end;
 
@@ -1011,6 +1073,7 @@ begin
   FSnapActive := True;
   FSnapPhase := 0;
   FSnapPos := 0;
+  PM.SnapshotBegin;
 end;
 
 { the unfinished file is thrown away; the journal of the new generation stays and is replayed
@@ -1052,16 +1115,23 @@ begin
     FSnapPhase := 2;
     FSnapPos := 0;
   end;
-  while (FSnapPos < ProfileCount) and (Budget > 0) do
+  if FSnapPhase = 2 then
   begin
-    if Profiles[FSnapPos] <> nil then
+    while (FSnapPos < ProfileCount) and (Budget > 0) do
     begin
-      W.SnapshotProfile(Profiles[FSnapPos]^);
-      Dec(Budget);
+      if Profiles[FSnapPos] <> nil then
+      begin
+        W.SnapshotProfile(Profiles[FSnapPos]^);
+        Dec(Budget);
+      end;
+      Inc(FSnapPos);
     end;
-    Inc(FSnapPos);
+    if FSnapPos < ProfileCount then
+      Exit;
+    FSnapPhase := 3;
   end;
-  if FSnapPos < ProfileCount then
+  { the player-on-map records last }
+  if not PM.SnapshotStep(W, Budget) then
     Exit;
   FSnapActive := False;
   Result := True;

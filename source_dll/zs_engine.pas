@@ -18,6 +18,7 @@ unit zs_engine;
 interface
 
 uses
+  zs_fight,
   SysUtils, Classes, Math, zs_types, zs_util, zs_config, zs_fields, zs_fileio, zs_store, zs_legacy,
   zs_db, zs_rank, zs_rating, zs_weapons, zs_live, zs_rules, zs_service, zs_identity, zs_balance, zs_maps;
 
@@ -91,6 +92,7 @@ type
 
   TSlotExtra = record
     HudEvents: array of AnsiString;
+    HudUntil: array of LongInt;   { per note: 0 = not on the HUD yet, else the tick it goes ([HUD] EventSeconds) }
     HudText: AnsiString;
     HudSentTick: LongInt;
     Welcomed: Boolean;
@@ -106,6 +108,8 @@ type
     Pages: LongInt;
     YesLockUntil: Double;
     JetTicks: LongInt;
+    { !lastfight: the recent fight events and the last deaths (zs_fight, zs_engine_fight.inc) }
+    Fight: TLfSlot;
     { the weapon + 1 picked in this life as primary (0) and secondary (1), 0 = none yet }
     Picked: array[0..1] of LongInt;
     { the reload of the weapon in hand (zs_engine_reload.inc) }
@@ -169,6 +173,7 @@ type
     MaxDeficit: array[1..4] of LongInt;
     TimeLeft: LongInt;
     FirstBlood: Boolean;
+    RoundFirstBlood: Boolean;   { survival: the first kill of the running round was made }
     FirstDamage: Boolean;
     LastStandGiven: array[0..4] of Boolean;
     ClutchSlot: LongInt;
@@ -179,6 +184,10 @@ type
     RoundIn: array[1..MAX_PLAYERS] of Boolean;
     RoundPending: Boolean;
     RoundTick: LongInt;
+    { how survival rounds end (zs_engine_matrix.inc): the tick of the last capture, and whether a
+      team round runs (two teams were seen standing since the last round ended) }
+    CaptureTick: LongInt;
+    RoundLive: Boolean;
     Leavers: array of TLeaver;
     HumansMax: LongInt;
     LastVoteMap: AnsiString;    { the last map vote started during this match }
@@ -733,7 +742,7 @@ function NewAction(Kind, Slot, Color: LongInt; const Text: AnsiString): TZSActio
 implementation
 
 uses
-  zs_commands, zs_export, zs_crash, zs_mysql, zs_sqldb;
+  zs_commands, zs_export, zs_crash, zs_mysql, zs_sqldb, zs_matrix;
 
 function NewEvent(Kind: TZSEventKind): TZSEvent;
 begin
@@ -777,6 +786,8 @@ begin
     else Result := 'team ' + IntToStr(Team);
   end;
 end;
+
+{$I zs_engine_fight.inc}
 
 { ---------------- thread ---------------- }
 
@@ -945,6 +956,8 @@ begin
     DB.HideAfterDays := 0;
   { ZS_Command reads this on the game thread: whether /votemap is the map vote's }
   MapVoteSlash := Ord(Cfg.MapVoteEnabled and (Cfg.MapVoteCommands and MVC_SLASHVOTEMAP <> 0));
+  { [Matrix] MaxRivals: a smaller limit shortens a rival list when it takes a new rival }
+  DB.PM.MaxRivals := Cfg.MatrixMaxRivals;
 end;
 
 function MailSettingsOf(const Cfg: TZSConfig): TMailSettings;
@@ -1743,6 +1756,9 @@ begin
         Line := Line + Format(', and after %d days from the least active accounts', [Cfg.CheckPointsMaxWaitDays]);
       Line := Line + ')';
     end;
+    if Rep.MatrixPruned > 0 then
+      Line := Line + Format('; %d player-on-map records of accounts not seen for %d days removed ([Matrix] MatrixPruneDays)',
+        [Rep.MatrixPruned, Cfg.MatrixPruneDays]);
     WriteServer('[ZitroStats] ' + Line);
     AppendLog('balance.log', Line);
     if DB.HideAfterDays > 0 then
@@ -2001,34 +2017,73 @@ begin
         Exit(False);
 end;
 
-{ What happened since the HUD was drawn last (RefreshHud shows it on one line, once a second). At
-  most HUD_EVENTS_MAX entries: when they are full, a new one pushes out the oldest plain points
-  entry - the points are on the same line anyway - so a burst of kills still shows its "Triple
-  kill!" or "RAMPAGE!" instead of the points of the first kill. }
+{ HudUntil keeps one entry per note of HudEvents; when HudEvents was set on its own, the missing
+  entries are notes not shown yet }
+procedure FitHudUntil(var X: TSlotExtra);
+var
+  k, n: LongInt;
+begin
+  n := Length(X.HudEvents);
+  k := Length(X.HudUntil);
+  if k = n then
+    Exit;
+  SetLength(X.HudUntil, n);
+  while k < n do
+  begin
+    X.HudUntil[k] := 0;
+    Inc(k);
+  end;
+end;
+
+{ The notes on the HUD line: what happened since it was drawn last, and what it shows for
+  [HUD] EventSeconds (RefreshHud draws it once a second). At most HUD_EVENTS_MAX: when they are
+  full, a new note pushes out the oldest one that had its time on the HUD already (a plain points
+  entry first - the points are on the same line anyway), else the oldest plain points entry, so a
+  burst of kills still shows its "Triple kill!" or "RAMPAGE!" instead of the points of the first
+  kill. }
 procedure TZSEngine.HudEvent(Slot: LongInt; const Text: AnsiString);
 var
-  n, k: LongInt;
+  n, k, Pass, Drop: LongInt;
 begin
+  { !lastfight keeps what the HUD told the player: points, assists, feats }
+  LastFightNote(Self, Slot, Text);
   if not SlotValid(Slot) or not Live[Slot].Human then
     Exit;
+  FitHudUntil(Extra[Slot]);
   n := Length(Extra[Slot].HudEvents);
   if n >= HUD_EVENTS_MAX then
   begin
-    k := 0;
-    while (k < n) and not PlainPointsEntry(Extra[Slot].HudEvents[k]) do
-      Inc(k);
-    if k >= n then
+    Drop := -1;
+    for Pass := 0 to 2 do
+    begin
+      for k := 0 to n - 1 do
+        if ((Pass = 0) and (Extra[Slot].HudUntil[k] <> 0) and PlainPointsEntry(Extra[Slot].HudEvents[k])) or
+           ((Pass = 1) and (Extra[Slot].HudUntil[k] <> 0)) or
+           ((Pass = 2) and PlainPointsEntry(Extra[Slot].HudEvents[k])) then
+        begin
+          Drop := k;
+          Break;
+        end;
+      if Drop >= 0 then
+        Break;
+    end;
+    if Drop < 0 then
       Exit;
+    k := Drop;
     while k < n - 1 do
     begin
       Extra[Slot].HudEvents[k] := Extra[Slot].HudEvents[k + 1];
+      Extra[Slot].HudUntil[k] := Extra[Slot].HudUntil[k + 1];
       Inc(k);
     end;
     Extra[Slot].HudEvents[n - 1] := Text;
+    Extra[Slot].HudUntil[n - 1] := 0;
     Exit;
   end;
   SetLength(Extra[Slot].HudEvents, n + 1);
+  SetLength(Extra[Slot].HudUntil, n + 1);
   Extra[Slot].HudEvents[n] := Text;
+  Extra[Slot].HudUntil[n] := 0;
 end;
 
 procedure TZSEngine.AppendLog(const FileName, Line: AnsiString);
@@ -2606,6 +2661,7 @@ begin
     Result := Cfg.RankTiers[T].Color;
 end;
 
+{$I zs_engine_matrix.inc}
 {$I zs_engine_events.inc}
 {$I zs_engine_reload.inc}
 {$I zs_engine_combat.inc}
