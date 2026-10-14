@@ -11,7 +11,10 @@ unit mysqlwire;
 
   Covered: the handshake, the password methods the servers use (mysql_native_password,
   caching_sha2_password with its fast and its full path, sha256_password), a server that
-  switches the method half way, text queries and their result sets. Not covered: TLS (this
+  switches the method half way, text queries and their result sets. The password of the full
+  path is encrypted with the server's RSA key: the one the caller gives (ServerPublicKey), or
+  else the one the server sends when asked - which comes over the same plain connection, so
+  only the given key keeps the password from somebody on the way. Not covered: TLS (this
   client never asks for it: a server that demands it refuses the login with an error of its
   own, and a user that must use it gets "access denied"), compression, prepared statements.
 
@@ -92,6 +95,7 @@ type
     FAffected: Int64;
     FPublicKey: AnsiString;
     procedure Drop;
+    function GivenKey: AnsiString;
     procedure ReadExact(var Buf; Count: LongInt);
     procedure WriteAll(const Buf; Count: LongInt);
     function ReadPacket: AnsiString;
@@ -109,6 +113,12 @@ type
     Database: AnsiString;
     ConnectTimeoutMs: LongInt;
     IOTimeoutMs: LongInt;
+    { The RSA public key of the database server, as PEM text or as the path of a PEM file (its
+      public_key.pem, or what SHOW STATUS LIKE 'Caching_sha2_password_rsa_public_key' shows).
+      With it the password of the full caching_sha2_password path and of sha256_password is
+      encrypted with this key, and the key the server sends is never used. Empty (the default):
+      the server is asked for its key, as before. }
+    ServerPublicKey: AnsiString;
     constructor Create;
     destructor Destroy; override;
     procedure Connect;
@@ -175,7 +185,8 @@ function MySha1(const S: AnsiString): AnsiString;
 function MySha256(const S: AnsiString): AnsiString;
 function MyScrambleNative(const Password, Nonce: AnsiString): AnsiString;
 function MyScrambleSha2(const Password, Nonce: AnsiString): AnsiString;
-function MyRsaEncrypt(const Pem, Msg: AnsiString): AnsiString;
+{ Aborted, when given, is looked at while it computes: True ends it with EMyError }
+function MyRsaEncrypt(const Pem, Msg: AnsiString; Aborted: PBoolean = nil): AnsiString;
 
 implementation
 
@@ -199,6 +210,15 @@ const
   { utf8mb4_general_ci: every MySQL since 5.5 and every MariaDB has it }
   CHARSET_UTF8MB4 = 45;
   MAX_PACKET = $FFFFFF;
+  { One answer of the server (a packet and the ones that continue it) is held in memory whole:
+    a server, or somebody on the way, that sent packet after packet without an end filled the
+    memory of the 32-bit game server. 64 MB is the default max_allowed_packet of MySQL 8. }
+  MAX_ANSWER = 64 * 1024 * 1024;
+  { The key the password is encrypted with is computed with on the thread that logs in. MySQL
+    makes keys of 2048 bits with the exponent 65537; a key of 64 KB or a long exponent took
+    minutes there, each time it connected. }
+  MAX_RSA_BYTES = 1024;      { 8192 bits }
+  MAX_RSA_EXP_BYTES = 4;
 
 { ---------------- small helpers ---------------- }
 
@@ -537,8 +557,15 @@ begin
     LimbsSub(Result, N);
 end;
 
-{ Base^Exp mod Modulus, all big-endian byte strings; the result has the modulus' length }
-function ModPow(const Base, Exp, Modulus: AnsiString): AnsiString;
+procedure CheckAborted(Aborted: PBoolean); inline;
+begin
+  if (Aborted <> nil) and Aborted^ then
+    raise EMyError.CreateCode(0, 'the connection was cut: the server is shutting down');
+end;
+
+{ Base^Exp mod Modulus, all big-endian byte strings; the result has the modulus' length.
+  Aborted (may be nil) is looked at in every round, so Abort ends it too. }
+function ModPow(const Base, Exp, Modulus: AnsiString; Aborted: PBoolean): AnsiString;
 var
   K, i, Bit: LongInt;
   N, A, R2, X, One: TLimbs;
@@ -562,6 +589,7 @@ begin
   R2[0] := 1;
   for i := 1 to 64 * K do
   begin
+    CheckAborted(Aborted);
     Carry := R2[K - 1] shr 31;
     for Bit := K - 1 downto 1 do
       R2[Bit] := (R2[Bit] shl 1) or (R2[Bit - 1] shr 31);
@@ -579,6 +607,7 @@ begin
   for i := 1 to Length(Exp) do
     for Bit := 7 downto 0 do
     begin
+      CheckAborted(Aborted);
       if Started then
         X := MontMul(X, X, N, Inv);
       if (Byte(Exp[i]) shr Bit) and 1 = 1 then
@@ -685,6 +714,8 @@ begin
   E := StripZeros(E);
   if (Length(N) < 64) or (E = '') then
     raise EMyError.CreateCode(0, 'the server sent a public key that cannot be read');
+  if (Length(N) > MAX_RSA_BYTES) or (Length(E) > MAX_RSA_EXP_BYTES) then
+    raise EMyError.CreateCode(0, 'the server sent a public key that is too big (at most 8192 bits and an exponent of 4 bytes)');
 end;
 
 { MGF1 with SHA-1 }
@@ -704,7 +735,7 @@ begin
 end;
 
 { RSAES-OAEP with SHA-1 and an empty label, the padding MySQL decrypts with }
-function MyRsaEncrypt(const Pem, Msg: AnsiString): AnsiString;
+function MyRsaEncrypt(const Pem, Msg: AnsiString; Aborted: PBoolean): AnsiString;
 var
   N, E, DB, Seed, MaskedDB, MaskedSeed, EM: AnsiString;
   K: LongInt;
@@ -718,7 +749,7 @@ begin
   MaskedDB := XorStr(DB, Mgf1(Seed, K - 20 - 1));
   MaskedSeed := XorStr(Seed, Mgf1(MaskedDB, 20));
   EM := #0 + MaskedSeed + MaskedDB;
-  Result := ModPow(EM, E, N);
+  Result := ModPow(EM, E, N, Aborted);
 end;
 
 { ---------------- values for statements ---------------- }
@@ -1213,6 +1244,34 @@ begin
   S.Free;
 end;
 
+{ ServerPublicKey as PEM text: given as such, or read from the file it names }
+function TMyConnection.GivenKey: AnsiString;
+var
+  FS: TFileStream;
+  n: Int64;
+begin
+  if Pos('-----BEGIN', ServerPublicKey) > 0 then
+    Exit(ServerPublicKey);
+  Result := '';
+  try
+    FS := TFileStream.Create(ServerPublicKey, fmOpenRead or fmShareDenyWrite);
+    try
+      n := FS.Size;
+      if (n > 0) and (n <= 65536) then
+      begin
+        SetLength(Result, n);
+        FS.ReadBuffer(Result[1], LongInt(n));
+      end;
+    finally
+      FS.Free;
+    end;
+  except
+    Result := '';
+  end;
+  if Pos('-----BEGIN', Result) = 0 then
+    raise EMyError.CreateCode(0, 'the public key of the database server cannot be read from ' + ServerPublicKey);
+end;
+
 procedure TMyConnection.Abort;
 begin
   EnterCriticalSection(FLock);
@@ -1349,6 +1408,11 @@ begin
     ReadExact(Hd, 4);
     Len := Hd[0] or (Hd[1] shl 8) or (Hd[2] shl 16);
     FSeq := Byte(Hd[3] + 1);
+    if Int64(Length(Result)) + Len > MAX_ANSWER then
+    begin
+      Drop;
+      raise EMyError.CreateCode(0, 'the database server sent an answer bigger than 64 MB');
+    end;
     SetLength(Part, Len);
     if Len > 0 then
       ReadExact(Part[1], Len);
@@ -1423,7 +1487,16 @@ var
   function Encrypted(const Pem, Seed: AnsiString): AnsiString;
   begin
     FPublicKey := Pem;
-    Result := MyRsaEncrypt(Pem, XorStr(Password + #0, Seed));
+    Result := MyRsaEncrypt(Pem, XorStr(Password + #0, Seed), @FAborted);
+  end;
+
+  { the key the server sent, or the one given instead of it }
+  function KeyFor(const Sent: AnsiString): AnsiString;
+  begin
+    if ServerPublicKey <> '' then
+      Result := GivenKey
+    else
+      Result := Sent;
   end;
 
 begin
@@ -1529,20 +1602,24 @@ begin
             begin
               if Password = '' then
                 WritePacket(#0)
+              else if ServerPublicKey <> '' then
+                WritePacket(Encrypted(GivenKey, Nonce))
               else if FPublicKey <> '' then
                 WritePacket(Encrypted(FPublicKey, Nonce))
               else
                 WritePacket(#2);                   { send your public key, please }
             end
             else if Pos('-----BEGIN', Data) > 0 then
-              WritePacket(Encrypted(Data, Nonce))
+              WritePacket(Encrypted(KeyFor(Data), Nonce))
             else
               raise EMyError.CreateCode(0, 'the database server answered the login in a way this client does not know');
           end
           else if Plugin = 'sha256_password' then
           begin
+            { the key was asked for (the first answer cannot hold the encrypted password); with
+              a key given, what came is not used }
             if Pos('-----BEGIN', Data) > 0 then
-              WritePacket(Encrypted(Data, Nonce))
+              WritePacket(Encrypted(KeyFor(Data), Nonce))
             else
               raise EMyError.CreateCode(0, 'the database server answered the login in a way this client does not know');
           end
