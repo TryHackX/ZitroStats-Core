@@ -241,7 +241,7 @@ begin
 end;
 
 { every line the players saw so far, and every server line of the map vote, fits LINE_W (the
-  folder of /zs_maps is a path of any length) }
+  folder of /zs_maps as well: it is named from the server folder, a long one by its end) }
 function AllFit(out Worst: AnsiString): Boolean;
 var
   k: LongInt;
@@ -254,7 +254,7 @@ begin
        ((Copy(TextOf(AllActs[k]), 1, 4) = '[Map') or (Pos('map vote', TextOf(AllActs[k])) > 0))) then
     begin
       T := TextOf(AllActs[k]);
-      if (Length(T) > LINE_W) and (Pos('[Maps] folder: ', T) <> 1) then
+      if Length(T) > LINE_W then
       begin
         if Result then
           Worst := Format('(%d) %s', [Length(T), T]);
@@ -569,8 +569,9 @@ begin
 
   TestUnits;
 
+  { the votes here follow each other on purpose: no gap between them (test_fix_ws4 has the gap) }
   MakeFile(Root + PathDelim + 'script' + PathDelim + 'settings.ini', '[MapVote]' + LineEnding + 'MapsFolder = ' +
-    MapsDir);
+    MapsDir + LineEnding + 'GapSeconds = 0');
   Engine := TZSEngine.Create(Root + PathDelim + 'script');
   Engine.Start;
   Check('engine ready and writable', WaitReady and not Engine.IsReadOnly);
@@ -1086,7 +1087,8 @@ begin
   Acts.Clear;
   Cmd(0, '/zs_maps', SRC_CONSOLE);
   Step;
-  Check('/zs_maps: the folder and its maps', Written('[Maps] folder: ' + MapsDir) and Written('[Maps] 7 maps, read at '));
+  Check('/zs_maps: the folder (from the server folder, no path of the disk) and its maps', Written('[Maps] folder: maps') and
+    not Written('[Maps] folder: ' + MapsDir) and Written('[Maps] 7 maps, read at '));
   Check('/zs_maps: the files Linux may not load', Written('[Maps] 2 file(s) not ending in ".pms"') and
     Written('  ctf_Run.PMS, inf_Moon.Pms'));
   Check('/zs_maps: the maps of the list without a file, and in another case than their file',
@@ -1181,7 +1183,8 @@ begin
   Step;
   Check('Enabled = 0: the commands are left to other scripts, Soldat''s vote only counted',
     (LinesTo(3) = 0) and (Count(Acts, ACT_VOTE_START, -1, '') = 0) and (MapStat('ctf_Run', 0) = i + 1));
-  MakeFile(Root + PathDelim + 'script' + PathDelim + 'settings.ini', '[MapVote]' + LineEnding + 'MapsFolder = ' + MapsDir);
+  MakeFile(Root + PathDelim + 'script' + PathDelim + 'settings.ini', '[MapVote]' + LineEnding + 'MapsFolder = ' + MapsDir +
+    LineEnding + 'GapSeconds = 0');
   Cmd(0, '/zs_reload', SRC_CONSOLE);
   Step;
   EnterCriticalSection(Engine.StateLock);

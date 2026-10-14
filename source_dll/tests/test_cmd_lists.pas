@@ -581,6 +581,14 @@ begin
   W^.TTKSumTicks := 562 * 45;
   W^.TTKCount := 562;
   W^.VestKills := 3;
+  { [Bridges] (5.6): the hits measured from where and when their bullets were made }
+  W^.HitDistSum := 4000 * 12.5;
+  W^.HitDistCount := 4000;
+  W^.LongestHit := 61.5;
+  W^.HitAirTicks := 4000 * 6;
+  W^.HitAirCount := 4000;
+  W^.KillAirTicks := 500 * 9;
+  W^.KillAirCount := 500;
   { melee and thrown: hits without shots of their own }
   P^.Weapons[WEP_CHAINSAW].Kills := 12;
   P^.Weapons[WEP_CHAINSAW].Hits := 57;
@@ -682,6 +690,14 @@ begin
       RoundsMapChange := 2;
       RoundsElimination[1] := 6;
       HealRegen := 12345.6;
+      { [Bridges] (5.6): the hits and kills measured here }
+      HitDistSum := 2000 * 18.5;
+      HitDistCount := 2000;
+      LongestHit := 95.5;
+      HitAirTicks := 2000 * 12;
+      HitAirCount := 2000;
+      KillAirTicks := 300 * 15;
+      KillAirCount := 300;
       SetLength(Heat, 3);
       Heat[0].Cell := (2048 + 1) * 4096 + 2048 + 1;
       Heat[0].Kills := 12;
@@ -754,8 +770,14 @@ begin
   Check('!mapstats on DM survival: how the rounds ended, without teams, the team rounds of before as one count',
     Has('How the Survival Rounds Ended') and (Pos('Last one standing: 40', L) = 1) and At(L, 37, 'Team rounds: 6') and
     At(L, 71, 'No survivor: 5') and Has('Cut by map change: 2') and not Has('elimination') and not Has('Kill Balance'));
+  Check('!mapstats: the range of the hits here', Has('Range on this Map') and Has('Longest Hit: 95.5m') and
+    Has('Avg Hit Dist: 18.5m') and Has('Avg Hit Air: 0.20s') and Has('Avg Kill Air: 0.25s') and
+    Has('From 2000 hits and 300 kills measured here since 5.6.'));
   Run('/topmaps');
   Check('!topmaps on DM: selfkills, not flags', Has('Top Maps [Page 1/1]') and Has('Selfs') and not Has('Caps') and Fits);
+  Run('/topmapsby hitdist;longesthit;hitair;killair');
+  Check('!topmapsby by the range metrics', Has('Top Maps by HitDist > LongHit > HitAir > KillAir') and
+    (Pos('18.5m', LineOf('RSCS_Arena')) > 0) and (Pos('95.5m', LineOf('RSCS_Arena')) > 0) and Fits);
   Run('/topmapsby pace');
   Check('!topmapsby fits', Has('Top Maps by Kills/min') and Fits);
   Run('/topmapsby kills;time;joins;leaves;quitrate');
@@ -794,6 +816,9 @@ begin
   Check('!wep ak: the player''s own kill distances, shares and bars in the columns of the names', Ok);
   Check('!wep ak: the player''s own distance, time to kill and vest kills', Has('Distances and times to kill') and
     Has('Avg Kill Dist: 30.0m') and Has('Avg TTK: 0.75s') and Has('Vest kills: 3'));
+  Check('!wep ak: the hits'' distance and air time and the kills'' air time of the player',
+    Has('Longest Hit: 61.5m') and Has('Avg Hit Dist: 12.5m') and Has('Avg Hit Air: 0.10s') and
+    Has('Avg Kill Air: 0.15s') and not Has('counted since 5.6'));
   Check('!wep ak: nothing of the whole server, which !serverwep shows', not Has('Server-wide') and not Has('Nemesis') and
     not Has('Of primaries') and Has('The whole server: !serverwep ak   against the other weapons: !playermatchup ak [p]'));
   Run('/serverwep ak');
@@ -817,15 +842,22 @@ begin
   Check('!serverwep ak: no vest kills row without vest kills, no share without picks', not Has('Vest kills') and
     Has('Of primaries: -'));
   Check('!serverwep ak on DM: no team picks', not Has('Alpha picks'));
+  Check('!serverwep ak: the hits'' distance and air time of every account', Has('Longest Hit: 61.5m') and
+    Has('Avg Hit Dist: 12.5m') and Has('Avg Hit Air: 0.10s') and Has('Avg Kill Air: 0.15s'));
   Run('/wep knife alice');
   Check('!wep knife: kills from before the distances were counted say so', Has('Avg Kill Dist: -') and
     Has('Counted for every account since 5.5: the kills before have no distance or time here.'));
+  Check('!wep knife: hits from before the hits were measured say so, no empty cells',
+    Has('The hits'' distance and air time: counted since 5.6, while [Bridges] reads the server.') and
+    not Has('Avg Hit Dist') and not Has('Avg Hit Air'));
   Run('/wep minigun alice');
   Check('!wep minigun without kills: no distances and no note', (IndexOfLine('<10m') < 0) and Has('Avg Kill Dist: -') and
     not Has('Counted for every account since 5.5'));
   Run('/wep saw alice');
   Check('!wep saw: hits without an accuracy, no shots, no kills per shot', Has('Hits: 57') and not Has('Hits: 57 (') and
     Has('Shots: -') and Has('Kills/Shot: -') and Fits);
+  Check('!wep saw: a blade''s hits have no distance: no cells, no note', not Has('Avg Hit Dist') and
+    not Has('counted since 5.6'));
   Run('/wep knife alice');
   Check('!wep knife: its throws are its shots, but no kills per shot and no zones', Has('Shots: 10') and Has('Kills/Shot: -') and
     not Has('Head: ') and Fits);
@@ -895,6 +927,19 @@ begin
       At(LineOf('Combat Knife'), Pos('Reloads', Lines[Idx]), '- ');
   Check('!allweaponsby reloads: a metric that is no column of !allweapons gets one; no reloads for a knife',
     Has('All Weapons by Reloads: Alice') and Ok and Fits and RowsUnderHeader(Idx, 'Best first'));
+  Run('/allweaponsby hitdist;longesthit;hitair;killair alice');
+  Idx := HeaderLine('Weapon ');
+  Ok := Idx >= 0;
+  if Ok then
+  begin
+    H := Lines[Idx];
+    Ok := (Pos('AK-74', Lines[Idx + 2]) = 1) and At(Lines[Idx + 2], Pos('HitDist', H), '12.5m') and
+      At(Lines[Idx + 2], Pos('LongHit', H), '61.5m') and At(Lines[Idx + 2], Pos('HitAir', H), '0.10s') and
+      At(Lines[Idx + 2], Pos('KillAir', H), '0.15s') and At(LineOf('Chainsaw'), Pos('HitDist', H), '- ') and
+      At(LineOf('Chainsaw'), Pos('HitAir', H), '- ');
+  end;
+  Check('!allweaponsby hitdist;longesthit;hitair;killair: the account''s own, - for a blade',
+    Has('All Weapons by HitDist > LongHit > HitAir > KillAir: Alice') and Ok and Fits and RowsUnderHeader(Idx, 'Best first'));
   Run('/allweaponsby kd; acc alice');
   Check('!allweaponsby: metrics joined by ";" with a space after it, then the player', Has('All Weapons by K/D > Acc%: Alice'));
   Run('/allweaponsby reloads;finished;progress;rdeath%;manual alice');
@@ -1116,6 +1161,21 @@ begin
     PW^.Headshots := 5000;
     PW^.Damage := 2500000;
     PW^.TimeUsed := 30000;
+    { [Bridges] (5.6): the AK's hits and kills measured here, and the record's own }
+    PW^.HitDistSum := 1000 * 22.5;
+    PW^.HitDistCount := 1000;
+    PW^.LongestHit := 80.5;
+    PW^.HitAirTicks := 1000 * 9;
+    PW^.HitAirCount := 1000;
+    PW^.KillAirTicks := 200 * 6;
+    PW^.KillAirCount := 200;
+    RA^.HitDistSum := 1000 * 22.5;
+    RA^.HitDistCount := 1000;
+    RA^.LongestHit := 80.5;
+    RA^.HitAirTicks := 1000 * 9;
+    RA^.HitAirCount := 1000;
+    RA^.KillAirTicks := 200 * 6;
+    RA^.KillAirCount := 200;
     PW := PMWeaponOf(RA^, WEP_KNIFE);
     PW^.Kills := 135;
     PW^.Hits := 140;
@@ -1198,6 +1258,13 @@ begin
     PW^.Headshots := 300;
     PW^.Damage := 90000;
     PW^.TimeUsed := 7200;
+    PW^.HitDistSum := 500 * 40.0;
+    PW^.HitDistCount := 500;
+    PW^.LongestHit := 120.5;
+    PW^.HitAirTicks := 500 * 3;
+    PW^.HitAirCount := 500;
+    PW^.KillAirTicks := 300 * 3;
+    PW^.KillAirCount := 300;
     { an account that has not played since the per-map data is counted }
     Engine.DB.CreateProfile('Zed Old', '', 'HWZED', '8.8.8.8', 1000);
   finally
@@ -1331,6 +1398,18 @@ begin
   L := LineOf('Combat Knife');
   Check('!mapplayerweapstats: no accuracy for a knife', (Idx >= 0) and (L <> '') and At(L, Pos('Acc%', Lines[Idx]), '- '));
   Check('!mapplayerweapstats: only the weapons of the record', not Has('USSOCOM') and not Has('M72 LAW'));
+  Idx := IndexOfLine('LongHit   HitDist   HitAir    KillAir   Measured');
+  Ok := Idx >= 0;
+  if Ok then
+  begin
+    L := Lines[Idx + 1];
+    Ok := RowsUnderHeader(Idx, 'Share = of the kills here') and (Pos('AK-74', L) = 1) and
+      At(L, Pos('LongHit', Lines[Idx]), '80.5m') and At(L, Pos('HitDist', Lines[Idx]), '22.5m') and
+      At(L, Pos('HitAir', Lines[Idx]), '0.15s') and At(L, Pos('KillAir', Lines[Idx]), '0.10s') and
+      At(L, Pos('Measured', Lines[Idx]), '1000') and (Pos('Combat Knife', Lines[Idx + 2]) = 0);
+  end;
+  Check('!mapplayerweapstats: the range of the AK here (the knife has none), every cell under its header',
+    Has('Range: hits measured from where the bullet was made (since 5.6)') and Ok);
 
   RunAs(1, '/playermaps');
   Idx := HeaderLine('#    Map');
@@ -1564,6 +1643,20 @@ begin
     At(LineOf('Combat Knife'), Pos('Acc%', Lines[Idx]), '- '));
   Check('!mapweapstats: the totals and where each column comes from', Has('Map totals') and Has('Deadliest: AK') and
     Has('Kills, Share, Pick%: the map''s own counters, all time.') and Has('Per-map data: counted since 5.5'));
+  Idx := IndexOfLine('LongHit   HitDist   HitAir    KillAir   Measured');
+  Ok := Idx >= 0;
+  if Ok then
+    Ok := RowsUnderHeader(Idx) and (Pos('AK-74', Lines[Idx + 1]) = 1) and
+      At(Lines[Idx + 1], Pos('HitDist', Lines[Idx]), '22.5m') and (Pos('Barrett M82A1', Lines[Idx + 2]) = 1) and
+      At(Lines[Idx + 2], Pos('LongHit', Lines[Idx]), '120.5m') and At(Lines[Idx + 2], Pos('KillAir', Lines[Idx]), '0.05s') and
+      At(Lines[Idx + 2], Pos('Measured', Lines[Idx]), '500') and (Pos('=', Lines[Idx + 3]) = 1);
+  Check('!mapweapstats: the map''s average and the range of the weapons of the page in their order, every cell under ' +
+    'its header', Has('Avg Hit Dist: 18.5m') and Ok);
+  Run('/mapweapstats hitdist');
+  Idx := HeaderLine('Weapon ');
+  Check('!mapweapstats hitdist: the longest average first, a weapon without measured hits last',
+    Has('by hit distance [Page') and (Idx >= 0) and (Pos('Barrett M82A1', Lines[Idx + 2]) = 1) and
+    (Pos('AK-74', Lines[Idx + 3]) = 1));
   Run('/mapweapstats acc');
   Idx := HeaderLine('Weapon ');
   Check('!mapweapstats acc: the best accuracy first, a weapon without one last', Has('by accuracy [Page') and (Idx >= 0) and
@@ -1584,6 +1677,8 @@ begin
   Check('!mapwep <weapon>: one weapon on the map played now, 100 columns', Has('Weapon: AK-74 on RSCS_Arena') and Fits and
     Has('Kills: 15.1k') and Has('Share: 96.6% of kills') and Has('Of primaries: 75.0%') and Has('Nemesis: Barrett (4)') and
     Has('Top Victim: Barrett (12)') and Has('Deaths by it: 2001') and Has('Hits: 42.0k (25.4%)'));
+  Check('!mapwep: the range of its hits and kills here', Has('Longest Hit: 80.5m') and Has('Avg Hit Dist: 22.5m') and
+    Has('Avg Hit Air: 0.15s') and Has('Avg Kill Air: 0.10s'));
   Idx := HeaderLine('#    Nick');
   Check('!mapwep: the players with the most kills with it there', Has('Best players with the AK-74 here') and (Idx >= 0) and
     (Pos('1    Alice', Lines[Idx + 2]) = 1) and CellsAt(Idx, ['Kills', 'Deaths', 'K/D', 'Acc%', 'HS%', 'Damage', 'Time']));
@@ -1611,7 +1706,8 @@ begin
   Check('!playermaps help: the flags of the maps of a player, each of them works', FlagHelpWorks('/playermaps', ' alice',
     ['time', 'kills', 'deaths', 'K/D', 'points', 'wins', 'last game'], ', by ', ' ['));
   Check('!mapweapstats help: the flags of the weapons of a map, each of them works', FlagHelpWorks('/mapweapstats', '',
-    ['kills', 'picks', 'shots', 'hits', 'accuracy', 'headshot share', 'damage', 'time', 'players'], ', by ', ' ['));
+    ['kills', 'picks', 'shots', 'hits', 'accuracy', 'headshot share', 'damage', 'time', 'players', 'hit distance',
+    'longest hit', 'hit air time', 'kill air time'], ', by ', ' ['));
   Run('/rivals help');
   Check('!rivals help: what counts as points won and lost', Has('Pts Won: what killing the rival paid') and
     Has('Penalties of teamkills and selfkills and the capture pool move no points between two players.'));

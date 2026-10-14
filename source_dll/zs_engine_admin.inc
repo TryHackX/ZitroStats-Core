@@ -133,6 +133,13 @@ begin
           Say(S, 'Too many commands, slow down.', CLR_WARN);
         Exit;
       end;
+      { the answers to the player's last commands still wait for the game thread: a new one waits
+        for them, so a crowd asking for long lists cannot fill the output (ZSC-02) }
+      if FSlotText[S] >= SLOT_TEXT_WAIT then
+      begin
+        Say(S, 'Wait a moment - your last answers are still being sent.', CLR_WARN);
+        Exit;
+      end;
     end;
     if (S > 0) and Identity.HandleCommand(S, W, Src = SRC_CHAT) then
       Exit;
@@ -297,7 +304,9 @@ begin
   Pending.WaitingBackup := False;
 end;
 
-procedure TZSEngine.AskConfirmation(Slot, Kind: LongInt; const Arg: AnsiString; IntArg, IntArg2: LongInt; const What: AnsiString);
+{ Note: a line after "This will ...", what else the admin should know before /yes ('' = none) }
+procedure TZSEngine.AskConfirmation(Slot, Kind: LongInt; const Arg: AnsiString; IntArg, IntArg2: LongInt; const What: AnsiString;
+  const Note: AnsiString);
 begin
   { after a damaged database only the restore is allowed, it is the way back to saving }
   if (FReadOnly or (Writer = nil)) and
@@ -322,6 +331,18 @@ begin
     Say(Slot, 'Another operation is running, wait until it finishes.', CLR_WARN);
     Exit;
   end;
+  { another admin's operation that still waits for /yes is not taken over: that admin would only
+    hear at his /yes that it is gone (the console and every TCP admin are one admin, slot 0) }
+  if (Pending.Kind <> OP_NONE) and (Pending.AdminSlot <> Slot) and (Now <= Pending.Expires) then
+  begin
+    Say(Slot, Format('%s of %s waits for /yes (%d s left): try again then.', [OpDescription(Pending.Kind),
+      Pending.AdminName, Trunc((Pending.Expires - Now) * 86400) + 1]), CLR_WARN);
+    Exit;
+  end;
+  if (Pending.Kind <> OP_NONE) and (Now <= Pending.Expires) then
+    Say(Slot, Format('The %s that waited for your /yes is replaced.', [OpDescription(Pending.Kind)]), CLR_WARN);
+  { what waited before goes, a new password of /zs_setpass wiped }
+  ClearPending;
   Pending.Kind := Kind;
   Pending.AdminSlot := Slot;
   if Slot > 0 then
@@ -334,6 +355,8 @@ begin
   Pending.Expires := Now + Max(5, Cfg.AdminConfirmSeconds) / 86400;
   Pending.WaitingBackup := False;
   Say(Slot, 'This will ' + What + '.', CLR_WARN);
+  if Note <> '' then
+    Say(Slot, Note, CLR_WARN);
   Say(Slot, Format('Confirm with /yes <confirm password> within %d s, or /no.', [Max(5, Cfg.AdminConfirmSeconds)]), CLR_WARN);
 end;
 
@@ -460,6 +483,49 @@ begin
   Say(Slot, 'Confirmed. Making a backup first...', CLR_GOOD);
 end;
 
+{ /removeolderthan: 1 = the account goes (not seen since Cutoff), 2 = it is as old but stays (registered,
+  with protection days or online), 0 = it is not that old }
+function InactiveVerdict(E: TZSEngine; P: PPlayerProfile; Cutoff: Double): LongInt;
+begin
+  Result := 0;
+  if (P = nil) or (P^.LastPlayedTime <= 0) or (P^.LastPlayedTime >= Cutoff) then
+    Exit;
+  { old enough, but registered, protected by its protection days or playing right now }
+  if (P^.ProtectionDays > 0) or IsRegistered(P^) or (E.Identity.SlotOfProfile(P^.ID) > 0) then
+    Result := 2
+  else
+    Result := 1;
+end;
+
+{ /zs_merge: the merged account keeps the identity of #into (MergeProfileInto). When only #from has a
+  password, it goes along with its trusted computers: else whoever plays on the computer of #into
+  would play on an account its owner had locked. }
+procedure CarryPassword(var Dst: TPlayerProfile; const Src: TPlayerProfile);
+begin
+  Dst.PassHash := Src.PassHash;
+  Dst.PassSalt := Src.PassSalt;
+  Dst.PassIter := Src.PassIter;
+  Dst.PassSetTime := Src.PassSetTime;
+  Dst.TrustedDevices := Copy(Src.TrustedDevices);
+  Dst.NoTrustedDevices := Src.NoTrustedDevices;
+end;
+
+{ what the confirmation of /zs_merge tells about the identities }
+function MergeNote(const Src, Dst: TPlayerProfile): AnsiString;
+begin
+  if IsRealSteam(Dst.ActiveSteam) then
+    Result := Format('#%d keeps its Steam ID', [Dst.ID])
+  else
+    Result := Format('#%d keeps its computer', [Dst.ID]);
+  if IsRegistered(Src) and not IsRegistered(Dst) then
+    Result := Result + Format(' and gets the password of #%d', [Src.ID])
+  else if IsRegistered(Src) then
+    Result := Result + Format(' and its own password (that of #%d goes)', [Src.ID]);
+  if IsRealSteam(Src.ActiveSteam) and IsRealSteam(Dst.ActiveSteam) then
+    Result := Result + Format('; the Steam ID of #%d gets a new account at its next join', [Src.ID]);
+  Result := Result + '.';
+end;
+
 procedure TZSEngine.RunPendingOp;
 var
   i, Idx, Src, Removed, Kept, Slot: LongInt;
@@ -471,6 +537,9 @@ begin
   Pending.WaitingBackup := False;
   Slot := Pending.AdminSlot;
   What := '';
+  { the points these change are no points the players online won or lost in their session }
+  if Pending.Kind in [OP_RESET_ALL_PLAYERS, OP_RESET_PLAYER, OP_MERGE] then
+    NoteSessionPoints;
   case Pending.Kind of
     OP_RESET_ALL_PLAYERS:
       begin
@@ -554,19 +623,14 @@ begin
         Kept := 0;
         DB.BeginBulkDelete;
         for i := 0 to DB.ProfileCount - 1 do
-        begin
-          P := DB.Profiles[i];
-          if (P = nil) or (P^.LastPlayedTime <= 0) or (P^.LastPlayedTime >= Cutoff) then
-            Continue;
-          { old enough, but registered, protected by its protection days or playing right now }
-          if (P^.ProtectionDays > 0) or IsRegistered(P^) or (Identity.SlotOfProfile(P^.ID) > 0) then
-          begin
-            Inc(Kept);
-            Continue;
+          case InactiveVerdict(Self, DB.Profiles[i], Cutoff) of
+            1:
+              begin
+                DB.DeleteProfile(i);
+                Inc(Removed);
+              end;
+            2: Inc(Kept);
           end;
-          DB.DeleteProfile(i);
-          Inc(Removed);
-        end;
         DB.EndBulkDelete;
         What := Format('%d accounts inactive for %d days were removed', [Removed, Pending.IntArg]);
         { the admin sees that the rest was kept on purpose, not overlooked }
@@ -584,6 +648,12 @@ begin
         Idx := DB.IndexOfId(Pending.IntArg2);
         if DB.Valid(Src) and DB.Valid(Idx) and (Src <> Idx) and (Identity.SlotOfProfile(Pending.IntArg) = 0) then
         begin
+          if IsRegistered(DB.Profiles[Src]^) and not IsRegistered(DB.Profiles[Idx]^) then
+          begin
+            DB.BeginIdentityChange(Idx);
+            CarryPassword(DB.Profiles[Idx]^, DB.Profiles[Src]^);
+            DB.EndIdentityChange(Idx);
+          end;
           DB.MergeProfile(Idx, Src, Cfg.StartingPoints);
           What := Format('account #%d was merged into #%d', [Pending.IntArg, Pending.IntArg2]);
         end
@@ -614,6 +684,8 @@ begin
           end;
       end;
   end;
+  if Pending.Kind in [OP_RESET_ALL_PLAYERS, OP_RESET_PLAYER, OP_MERGE] then
+    KeepSessionPoints;
   if What = '' then
     What := OpDescription(Pending.Kind) + ': target not found';
   Audit('admin ' + Pending.AdminName + ': ' + What);
@@ -682,7 +754,7 @@ end;
 function TZSEngine.AdminCommand(Slot: LongInt; const W: TStringArray; Source: LongInt): Boolean;
 var
   Cmd, Arg, Why, Who: AnsiString;
-  Idx, Days, k, Src, Dst: LongInt;
+  Idx, Days, k, Src, Dst, Gone, GoneSteam, Stay: LongInt;
   L: TStringList;
 begin
   Result := True;
@@ -780,8 +852,31 @@ begin
     if Days < 30 then
       Say(Slot, 'Usage: /removeolderthan <days, at least 30>', CLR_WARN)
     else
-      AskConfirmation(Slot, OP_REMOVE_OLDER, '', Days, 0,
-        Format('delete unregistered accounts not seen for %d days', [Days]));
+    begin
+      { counted now as the operation counts: a Steam account has no password, so it is no
+        registered account and goes too }
+      Gone := 0;
+      GoneSteam := 0;
+      Stay := 0;
+      for k := 0 to DB.ProfileCount - 1 do
+        case InactiveVerdict(Self, DB.Profiles[k], Now - Days) of
+          1:
+            begin
+              Inc(Gone);
+              if IsRealSteam(DB.Profiles[k]^.ActiveSteam) then
+                Inc(GoneSteam);
+            end;
+          2: Inc(Stay);
+        end;
+      if Gone = 0 then
+        Say(Slot, Format('Nothing to delete (%d accounts not seen for %d days, all registered, protected or online).',
+          [Stay, Days]), CLR_WARN)
+      else
+        AskConfirmation(Slot, OP_REMOVE_OLDER, '', Days, 0,
+          Format('delete %d accounts not seen for %d days', [Gone, Days]),
+          Format('%d of them are Steam accounts; %d as old stay (a password, protection days or online).',
+            [GoneSteam, Stay]));
+    end;
   end
   else if Cmd = 'zs_merge' then
   begin
@@ -795,10 +890,16 @@ begin
       Src := -1;
       Dst := -1;
     end;
-    if DB.Valid(Src) and DB.Valid(Dst) and (Src <> Dst) then
+    { a Steam account merged into one without would be gone: the merged account keeps the identity
+      of #into, and the next join with Steam makes a new, empty account }
+    if DB.Valid(Src) and DB.Valid(Dst) and (Src <> Dst) and IsRealSteam(DB.Profiles[Src]^.ActiveSteam) and
+       not IsRealSteam(DB.Profiles[Dst]^.ActiveSteam) then
+      Say(Slot, Format('#%d is a Steam account, #%d is not: the merge would lose it. Use /zs_merge #%d #%d.',
+        [DB.Profiles[Src]^.ID, DB.Profiles[Dst]^.ID, DB.Profiles[Dst]^.ID, DB.Profiles[Src]^.ID]), CLR_WARN)
+    else if DB.Valid(Src) and DB.Valid(Dst) and (Src <> Dst) then
       AskConfirmation(Slot, OP_MERGE, '', DB.Profiles[Src]^.ID, DB.Profiles[Dst]^.ID,
         Format('merge #%d %s into #%d %s', [DB.Profiles[Src]^.ID, DB.Profiles[Src]^.ActiveName,
-          DB.Profiles[Dst]^.ID, DB.Profiles[Dst]^.ActiveName]))
+          DB.Profiles[Dst]^.ID, DB.Profiles[Dst]^.ActiveName]), MergeNote(DB.Profiles[Src]^, DB.Profiles[Dst]^))
     else
       Say(Slot, 'Usage: /zs_merge <#from> <#into>', CLR_WARN);
   end
@@ -903,6 +1004,9 @@ begin
     if Writer <> nil then
       Say(Slot, Format('journal gen %d, %d KB since snapshot, IO queue %d KB, dropped events %d',
         [Int64(Writer.Generation), Writer.JournalBytes div 1024, IO.PendingBytes div 1024, FEventsDropped]), CLR_HINT);
+    { [Matrix] grows with the accounts, their maps and their rivals: what it holds now }
+    Say(Slot, Format('[Matrix] %d player-on-map records, about %s MB in memory', [DB.PM.Count,
+      FloatStr(DB.PM.ApproxBytes / 1048576, 1)]), CLR_HINT);
     if (DB.Server.ScoreFixes > 0) or (DB.Server.VoidedCaptures > 0) then
       Say(Slot, Format('score guard: %d point(s) taken back, %d capture(s) of them (integrity.log)',
         [DB.Server.ScoreFixes, DB.Server.VoidedCaptures]), CLR_HINT);
@@ -1141,7 +1245,8 @@ begin
     Exit;
   end;
   try
-    Idx := Identity.ProfileIndex(Slot);
+    { a session that has not logged in to its registered account gets nothing of the account }
+    Idx := Identity.StatsIndex(Slot);
     if DB.Valid(Idx) then
       Result := ProfileStatValue(Self, DB.Profiles[Idx]^, Idx, StatId);
   finally
@@ -1191,7 +1296,7 @@ begin
     Exit(Round(V));
   end;
   try
-    Result := PlayerRank(Identity.ProfileIndex(Slot));
+    Result := PlayerRank(Identity.StatsIndex(Slot));
   finally
     LeaveCriticalSection(StateLock);
   end;
@@ -1245,8 +1350,9 @@ begin
 end;
 
 { the same for another library on a thread of its own (AntiFake): it waits for the statistics
-  instead of taking an older answer, and adds the SteamID after a tab }
-function TZSEngine.ApiTopPlayerWait(Rank: LongInt): AnsiString;
+  instead of taking an older answer, and adds the SteamID after a tab; WithHwid (API 17,
+  ZS_API_Top_Player_Copy2) the computer (HWID) of the account after another tab }
+function TZSEngine.ApiTopPlayerWait(Rank: LongInt; WithHwid: Boolean): AnsiString;
 var
   Idx: LongInt;
 begin
@@ -1259,7 +1365,11 @@ begin
       Exit;
     Idx := DB.Ranks[RANK_POINTS].At(Rank);
     if DB.Valid(Idx) then
+    begin
       Result := DB.Profiles[Idx]^.ActiveName + #9 + DB.Profiles[Idx]^.ActiveSteam;
+      if WithHwid then
+        Result := Result + #9 + DB.Profiles[Idx]^.ActiveHWID;
+    end;
   finally
     LeaveCriticalSection(StateLock);
   end;

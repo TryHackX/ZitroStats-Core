@@ -316,7 +316,8 @@ begin
 end;
 
 { An account without Steam is the account of a computer, as on one server: the key of its HWID,
-  hashed, so a website reading the table sees no HWID. '' for a Steam account. }
+  hashed, so the key column shows no HWID. '' for a Steam account. The whole record in the data
+  column holds the login data (shared by every server): a website gets the statistics columns only. }
 function HwidKey(const P: TPlayerProfile): AnsiString;
 begin
   Result := '';
@@ -1407,7 +1408,7 @@ begin
     Exit;
   P := E.DB.Profiles[Idx];
   E.DB.BeginIdentityChange(Idx);
-  Merge3Profile(P^, B, R);
+  Merge3Profile(P^, B, R, E.Cfg.NameHistoryLimit);
   E.DB.EndIdentityChange(Idx);
   P^.SyncBase := RemoteData;
   P^.SyncVersion := Version;
@@ -1445,10 +1446,10 @@ begin
         E.DB.PM.MergeAccount(O.Id, O.NewId, E.DB.Profiles[Idx]^.SyncBase <> '');
         T := E.DB.Profiles[Other]^;
         UniqueProfileLists(T);
-        Merge3Profile(T, OB, M);
+        Merge3Profile(T, OB, M, E.Cfg.NameHistoryLimit);
         X := E.DB.Profiles[Idx]^;
         UniqueProfileLists(X);
-        Merge3Profile(X, B, T);
+        Merge3Profile(X, B, T, E.Cfg.NameHistoryLimit);
         X.ID := O.NewId;
         E.DB.BeginIdentityChange(Other);
         P := E.DB.Profiles[Other];
@@ -2747,7 +2748,7 @@ begin
             else
             begin
               UniqueProfileLists(Cur);
-              Merge3Profile(Cur, Base, Remote);
+              Merge3Profile(Cur, Base, Remote, E.Cfg.NameHistoryLimit);
             end;
           end;
           if Id > 0 then

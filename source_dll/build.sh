@@ -69,6 +69,9 @@ rm -rf "$probe"
 
 # the MySQL mirror is always part of the library and needs nothing else on the server
 "$FPC" -B -Pi386 -Tlinux -Mobjfpc -Sh $OPTS ${UNITPATH:+"$UNITPATH"} -FU"$OUT" -FE"$OUT" -ozitrostats_dll.so zs_main.pas
-cp -f "$OUT/zitrostats_dll.so" ../zitrostats_dll.so
-chmod 755 ../zitrostats_dll.so
-echo "Built ../zitrostats_dll.so"
+# A new file beside the old one, renamed over it: a running server keeps the library it loaded
+# (a copy onto that file would change its code under the server and crash it).
+cp -f "$OUT/zitrostats_dll.so" ../zitrostats_dll.so.new
+chmod 755 ../zitrostats_dll.so.new
+mv -f ../zitrostats_dll.so.new ../zitrostats_dll.so
+echo "Built ../zitrostats_dll.so - a running server keeps the old library until it restarts"

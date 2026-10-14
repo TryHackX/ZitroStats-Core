@@ -184,7 +184,7 @@ begin
   L := TStringList.Create;
   L.Text := Body;
   for k := 0 to L.Count - 1 do
-    if (Copy(L[k], 1, 4) = '    ') and (Length(Trim(L[k])) = 8) then
+    if (Copy(L[k], 1, 4) = '    ') and (Length(Trim(L[k])) = 12) then
       Result := Trim(L[k]);
   L.Free;
 end;
@@ -369,7 +369,8 @@ begin
     Cmd(15, '/login bad' + IntToStr(k) + 'xx');
     RunJobs;
   end;
-  Check('account locked after 5 failures', (ById(BobId)^.LoginLockUntil > T) and Said(15, 'locked'));
+  Check('this computer locked after 5 failures, not the account',
+    (ById(BobId)^.LoginLockUntil < LocalToUtc(T)) and Said(15, 'locked'));
   Advance(3);
   Cmd(15, '/login secretpw1');
   Check('locked account refuses even the right password', (Length(Host.Jobs) = 0) and Said(15, 'Too many failed'));
@@ -393,7 +394,7 @@ begin
   Cmd(15, '/setemail bob@example.com');
   RunJobs;
   Code := ExtractCode(Host.LastMail);
-  Check('verification mail with a code', (Length(Code) = 8) and (ById(BobId)^.EmailPending = 'bob@example.com'));
+  Check('verification mail with a code', (Length(Code) = 12) and (ById(BobId)^.EmailPending = 'bob@example.com'));
   Cmd(15, '/verifyemail WRONG123');
   Check('wrong code rejected', not ById(BobId)^.EmailVerified and Said(15, 'Wrong code'));
   Cmd(15, '/verifyemail ' + LowerCase(Code));
@@ -410,7 +411,7 @@ begin
   Cmd(16, Format('/forgotpass #%d', [BobId]));
   RunJobs;
   Code := ExtractCode(Host.LastMail);
-  Check('reset mail sent without showing the address', (Length(Code) = 8) and Said(16, 'reset code was sent') and
+  Check('reset mail sent without showing the address', (Length(Code) = 12) and Said(16, 'reset code was sent') and
     not Said(16, '@example.com'));
   Advance(3);
   Cmd(16, '/resetpass ' + Code + ' resetpw99 resetpw99');
@@ -506,7 +507,7 @@ begin
   Cmd(27, Format('/login #%d wrong5xx', [BobId]));
   RunJobs;
   Check('failures older than the lock time do not count', (ById(BobId)^.LoginFailCount = 1) and
-    (ById(BobId)^.LoginLockUntil < T));
+    (ById(BobId)^.LoginLockUntil < LocalToUtc(T)));
   Advance(3);
   Cmd(26, '/login resetpw99');
   Cmd(27, Format('/login #%d resetpw99', [BobId]));

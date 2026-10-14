@@ -1,0 +1,4 @@
+# server bytecode and debug symbols, compiler output
+*.psb
+*.psd
+source_dll/build/

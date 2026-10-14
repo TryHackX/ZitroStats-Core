@@ -7,8 +7,13 @@ unit zs_crash;
   the exception code, the module and offset of the faulting instruction, the thread, the
   registers, a stack trace and the last things this library did. The handler only reads memory
   and appends to the file; it never changes how an exception is handled, so the server behaves
-  exactly as it would without it. Pascal exceptions of this library and of the server do not go
-  through Windows exception handling and are not written here.
+  exactly as it would without it. Free Pascal 3.2 raises the exceptions of its code (this library,
+  the other libraries of the server built with it) through Windows exception handling with the code
+  E0465043, caught or not; they belong to the try/except of that code and are not written here, unless
+  nothing catches one: then the unhandled-exception filter (chained before the one that was there)
+  writes it, because it ends the process. A
+  software exception of another kind (C++: E06D7363) is told apart by the place that raised it, not
+  by its address in RaiseException, which every one of them shares.
 
   The same exception at the same address is written three times at most, and a run writes 300
   records at most. The handler also runs on threads this library does not know and while the
@@ -216,9 +221,44 @@ end;
 function Serious(Code: DWORD): Boolean;
 begin
   { errors (C...) and software exceptions (E...: C++ and others), not .NET, debugger notices or
-    thread naming }
+    thread naming, and not the exceptions of Free Pascal 3.2 code (E0465043): nearly all of them are
+    caught where they are raised }
   Result := ((Code and $F0000000) = $C0000000) or
-    (((Code and $F0000000) = $E0000000) and (Code <> $E0434352));
+    (((Code and $F0000000) = $E0000000) and (Code <> $E0434352) and (Code <> $E0465043));
+end;
+
+{ a software exception (E...) is raised by RaiseException in KERNELBASE, so its address is the same
+  for all of them: the first return address on the frame chain outside that module is the place
+  that raised it (nil = not found, or no software exception) }
+function RaisedFrom(R: PExcRecord; C: PContext): Pointer;
+var
+  M, M2: HMODULE;
+  Lo, Hi, Frame, Next, Ret: PtrUInt;
+  i: LongInt;
+begin
+  Result := nil;
+  if (C = nil) or ((R^.Code and $F0000000) <> $E0000000) then
+    Exit;
+  M := 0;
+  if not GetModuleHandleExA(FROM_ADDRESS or UNCHANGED_REFCOUNT, R^.Address, M) or (M = 0) then
+    Exit;
+  StackBounds(Lo, Hi);
+  Frame := C^.Ebp;
+  for i := 1 to 8 do
+  begin
+    if (Frame < Lo) or (Frame + 8 > Hi) or ((Frame and 3) <> 0) then
+      Exit;
+    Ret := PPtrUInt(Frame + 4)^;
+    M2 := 0;
+    if not IsCode(Ret) then
+      Exit;
+    if not GetModuleHandleExA(FROM_ADDRESS or UNCHANGED_REFCOUNT, Pointer(Ret), M2) or (M2 <> M) then
+      Exit(Pointer(Ret));
+    Next := PPtrUInt(Frame)^;
+    if Next <= Frame then
+      Exit;
+    Frame := Next;
+  end;
 end;
 
 { False when this exception at this address was written often enough already }
@@ -302,7 +342,7 @@ begin
   end;
 end;
 
-procedure BuildRecord(P: PExcPointers; var O: TOut);
+procedure BuildRecord(P: PExcPointers; var O: TOut; From: Pointer);
 var
   R: PExcRecord;
   C: PContext;
@@ -315,6 +355,8 @@ begin
   O.Len := 0;
   Put(O, #13#10 + Stamp + '  thread ' + ThreadName(GetCurrentThreadId) + #13#10 + '  ');
   PutException(O, R, 0);
+  if From <> nil then
+    Put(O, '  raised from ' + Where(From) + #13#10);
   if (C <> nil) and (R^.Code <> $C00000FD) then
   begin
     Put(O, '  eax ' + HexStr(C^.Eax, 8) + ' ebx ' + HexStr(C^.Ebx, 8) + ' ecx ' + HexStr(C^.Ecx, 8) +
@@ -371,6 +413,7 @@ end;
 function OnException(P: PExcPointers): LongInt; stdcall;
 var
   R: PExcRecord;
+  From, Key: Pointer;
 begin
   Result := 0; { EXCEPTION_CONTINUE_SEARCH: the other handlers decide what happens }
   R := P^.Rec;
@@ -379,13 +422,51 @@ begin
   { one record at a time; an exception raised while a record is written is not written }
   if InterlockedCompareExchange(Busy, 1, 0) <> 0 then
     Exit;
-  if FirstTimes(R^.Code, R^.Address) then
+  From := RaisedFrom(R, P^.Ctx);
+  Key := R^.Address;
+  if From <> nil then
+    Key := From;
+  if FirstTimes(R^.Code, Key) then
   begin
     Inc(Records);
-    BuildRecord(P, OutBuf);
+    BuildRecord(P, OutBuf, From);
     WriteOut(OutBuf);
   end;
   Busy := 0;
+end;
+
+type
+  TFilterFunc = function(P: PExcPointers): LongInt; stdcall;
+
+var
+  PrevFilter: Pointer = nil;
+
+{ the last handler of the process, for an exception nothing caught. The vectored handler leaves the
+  exceptions of Free Pascal code (E0465043) out because nearly all of them are caught; one that gets
+  here ends the process, so it is written now. Then the filter that was there before decides, as it
+  would without this library. }
+function OnUnhandled(P: PExcPointers): LongInt; stdcall;
+var
+  R: PExcRecord;
+  From: Pointer;
+begin
+  Result := 0; { EXCEPTION_CONTINUE_SEARCH }
+  if P <> nil then
+  begin
+    R := P^.Rec;
+    if (R <> nil) and (R^.Code = $E0465043) and (Records < MAX_RECORDS) then
+      if InterlockedCompareExchange(Busy, 1, 0) = 0 then
+      begin
+        From := RaisedFrom(R, P^.Ctx);
+        Inc(Records);
+        BuildRecord(P, OutBuf, From);
+        Put(OutBuf, '  not caught by any handler: the process ends' + #13#10);
+        WriteOut(OutBuf);
+        Busy := 0;
+      end;
+  end;
+  if PrevFilter <> nil then
+    Result := TFilterFunc(PrevFilter)(P);
 end;
 
 procedure CrashInstall(const Dir, Title: AnsiString);
@@ -407,8 +488,9 @@ begin
     MoveFileExA(PChar(Path), PChar(Path + '.old'), MOVEFILE_REPLACE_EXISTING);
   FillChar(LogPath, SizeOf(LogPath), 0);
   Move(Path[1], LogPath[0], Length(Path));
-  Prev := SetUnhandledExceptionFilter(nil);
-  SetUnhandledExceptionFilter(Prev);
+  { the library is pinned (never unloaded), so the filter stays valid for the life of the process }
+  Prev := SetUnhandledExceptionFilter(@OnUnhandled);
+  PrevFilter := Prev;
   OutBuf.Len := 0;
   Put(OutBuf, #13#10 + Stamp + '  ' + ShortString(Title) + ' diagnostics started, process ' + Num(GetCurrentProcessId) +
     ', game thread ' + Num(GetCurrentThreadId) + #13#10);

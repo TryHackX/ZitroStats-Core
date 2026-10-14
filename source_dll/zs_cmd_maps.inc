@@ -1,7 +1,7 @@
 { zs_commands: map statistics and map rankings }
 
 const
-  MAP_METRICS: array[0..32] of TMetricDef = (
+  MAP_METRICS: array[0..36] of TMetricDef = (
     (Aliases: ' time playtime duration '; Header: 'Playtime'; Fmt: mfTime; Asc: False),             { 0 }
     (Aliases: ' matches plays games '; Header: 'Matches'; Fmt: mfInt; Asc: False),
     (Aliases: ' kills kill k '; Header: 'Kills'; Fmt: mfInt; Asc: False),
@@ -35,7 +35,12 @@ const
     (Aliases: ' endplayers lastplayers '; Header: 'EndPlayers'; Fmt: mfDec1; Asc: False),         { 30 }
     { the last second played with the statistics on, and the last time the map ran at all }
     (Aliases: ' lastplayed played '; Header: 'LastPlayed'; Fmt: mfDate; Asc: False),
-    (Aliases: ' lastloaded loaded '; Header: 'LastLoaded'; Fmt: mfDate; Asc: False)                { 32 }
+    (Aliases: ' lastloaded loaded '; Header: 'LastLoaded'; Fmt: mfDate; Asc: False),               { 32 }
+    { [Bridges] (5.6): the hits and kills here measured from where their bullet was made }
+    (Aliases: ' longesthit longhit '; Header: 'LongHit'; Fmt: mfMeters; Asc: False),
+    (Aliases: ' hitdist avghitdist '; Header: 'HitDist'; Fmt: mfMeters; Asc: False),
+    (Aliases: ' hitair avghitair hitflight '; Header: 'HitAir'; Fmt: mfSec; Asc: False),             { 35 }
+    (Aliases: ' killair avgkillair killflight '; Header: 'KillAir'; Fmt: mfSec; Asc: False)
   );
 
 { every ended match adds its length; data from before 5.1 has no count of them yet }
@@ -95,8 +100,39 @@ begin
     30: Result := SafeDivD(M.CurveSum[9], M.CurveSecs[9]);
     31: Result := M.LastPlayedTime;
     32: Result := M.LastLoadedTime;
+    33: Result := M.LongestHit;
+    34: Result := SafeDivD(M.HitDistSum, M.HitDistCount);
+    35: Result := SafeDivD(M.HitAirTicks, M.HitAirCount) / TICKS_PER_SECOND;
+    36: Result := SafeDivD(M.KillAirTicks, M.KillAirCount) / TICKS_PER_SECOND;
     else Result := 0;
   end;
+end;
+
+{ the averages of the hits and kills measured on a map (5.6) are ranked only when made of enough
+  (SampleNeed, as PlayerMetricNeed); 0 for the other metrics }
+function MapMetricNeed(Id: LongInt; out What: AnsiString): LongInt;
+begin
+  What := '';
+  Result := 0;
+  case Id of
+    34: begin What := 'measured hits'; Result := SAMPLE_EVENTS; end;
+    35: begin What := 'timed hits'; Result := SAMPLE_EVENTS; end;
+    36: begin What := 'timed kills'; Result := SAMPLE_EVENTS; end;
+  end;
+end;
+
+{ a map below the need of an average (Need from SampleNeed, 0 = none) }
+function MapMetricShort(const M: TMapProfile; Id: LongInt; Need: Double): Boolean;
+var
+  Count: Double;
+begin
+  case Id of
+    34: Count := M.HitDistCount;
+    35: Count := M.HitAirCount;
+    36: Count := M.KillAirCount;
+    else Count := 0;
+  end;
+  Result := (Need > 0) and (Count < Need);
 end;
 
 var
@@ -254,6 +290,20 @@ begin
   Remember(E, Slot, QK_TOPMAPS, '', (First - 1) div PER_PAGE + 1, PageCount(Count, PER_PAGE));
 end;
 
+{ a text that names at least one map metric (as HasPlayerMetric) }
+function HasMapMetric(const Query: AnsiString): Boolean;
+var
+  Tokens: TStringArray;
+  Page, k: LongInt;
+begin
+  Page := 1;
+  Tokens := MetricTokens(Query, Page);
+  for k := 0 to High(Tokens) do
+    if MetricIndex(MAP_METRICS, Tokens[k]) >= 0 then
+      Exit(True);
+  Result := False;
+end;
+
 procedure TopMapsByHelp(E: TZSEngine; Slot: LongInt);
 const
   W = LINE_W;
@@ -270,6 +320,8 @@ begin
   Out(E, Slot, '[Combat & Objectives]', CLR_HEADER);
   Out(E, Slot, '  kills, selfkills, caps, returns, grabs, drops, thrown, rwins, fastcap, avgcap,', WHITE);
   Out(E, Slot, '  comebacks, close', WHITE);
+  Out(E, Slot, '[Range, since 5.6 (the server bridges)]', CLR_HEADER);
+  Out(E, Slot, '  longesthit, hitdist (the hits'' distance), hitair, killair (how long the bullets flew)', WHITE);
   Out(E, Slot, '[Dates, newest first]', CLR_HEADER);
   Out(E, Slot, '  lastplayed (the last game with the statistics on), lastloaded (the map ran at all)', WHITE);
   Footer(E, Slot, W);
@@ -283,13 +335,28 @@ const
   NAME_W = 26;
   METRIC_W = 12;
 var
-  Tokens, Heads: TStringArray;
+  Tokens, Heads, Needed: TStringArray;
   Ids, Rows: TIntArray;
+  Needs: array[0..4] of Double;
+  Short: array[0..4] of Boolean;
   k, f, n, Pages, First, NameW, Color: LongInt;
-  Ignored, Canon, Title, Line: AnsiString;
+  Ignored, Canon, Title, Line, What: AnsiString;
   M: PMapProfile;
   Tmp: TMapProfile;
   ShowKills, ShowMatches, ShowTime: Boolean;
+
+  { the cell of a metric: "-" for a map below its need (Short says the page has one) }
+  function Cell(f: LongInt): AnsiString;
+  begin
+    if MapMetricShort(M^, Ids[f], Needs[f]) then
+    begin
+      Short[f] := True;
+      Result := '-';
+    end
+    else
+      Result := MetricText(MAP_METRICS[Ids[f]].Fmt, MapMetricValue(M^, Ids[f]));
+  end;
+
 begin
   Tokens := MetricTokens(Query, Page);
   Ids := nil;
@@ -317,9 +384,14 @@ begin
   begin
     Out(E, Slot, 'No valid map metric given.', CLR_BAD);
     if Ignored <> '' then
-      Out(E, Slot, '[Note] Unknown: ' + Ignored, CLR_HINT);
+      Out(E, Slot, '[Note] Unknown: ' + Clip(Ignored, LINE_W - 16), CLR_HINT);
     TopMapsByHelp(E, Slot);
     Exit;
+  end;
+  for f := 0 to High(Ids) do
+  begin
+    Needs[f] := SampleNeed(E, MapMetricNeed(Ids[f], What));
+    Short[f] := False;
   end;
   PoolMapKeys := MapPoolOnly(E);
   n := MapListCount(E);
@@ -333,7 +405,10 @@ begin
   begin
     M := MapAt(E, k, Tmp);
     for f := 0 to High(Ids) do
-      SortKeys[k * SortCols + f] := SortValue(MapMetricValue(M^, Ids[f]), MAP_METRICS[Ids[f]].Asc);
+      if MapMetricShort(M^, Ids[f], Needs[f]) then
+        SortKeys[k * SortCols + f] := -MaxDouble
+      else
+        SortKeys[k * SortCols + f] := SortValue(MapMetricValue(M^, Ids[f]), MAP_METRICS[Ids[f]].Asc);
     SortTie[k] := M^.ActiveTimePlays;
   end;
   Rows := OrderedRows(n);
@@ -386,7 +461,7 @@ begin
       if MAP_METRICS[Ids[0]].Fmt = mfDate then
         Line := Line + PadR(DateText(MapMetricValue(M^, Ids[0]), 'dd.mm.yy hh:nn'), 16)
       else
-        Line := Line + PadR(MetricText(MAP_METRICS[Ids[0]].Fmt, MapMetricValue(M^, Ids[0])), 16);
+        Line := Line + PadR(Cell(0), 16);
       if ShowKills then
         Line := Line + PadR(Num(M^.Kills), 10);
       if ShowMatches then
@@ -396,13 +471,21 @@ begin
     end
     else
       for f := 0 to High(Ids) do
-        Line := Line + PadR(Copy(MetricText(MAP_METRICS[Ids[f]].Fmt, MapMetricValue(M^, Ids[f])), 1, METRIC_W - 1), METRIC_W);
+        Line := Line + PadR(Copy(Cell(f), 1, METRIC_W - 1), METRIC_W);
     if Rows[k] = E.Match.MapIndex then
       Line := TrimRight(Line) + ' <actual>';
     Out(E, Slot, TrimRight(Line), Color);
   end;
+  Needed := nil;
+  for f := 0 to High(Ids) do
+    if Short[f] then
+    begin
+      MapMetricNeed(Ids[f], What);
+      PushNeed(Needed, NeedItem(MAP_METRICS[Ids[f]].Header, What, Needs[f]));
+    end;
+  NeedNote(E, Slot, Needed);
   if Ignored <> '' then
-    Out(E, Slot, '[Note] Ignored unknown metric(s): ' + Ignored, CLR_HINT);
+    Out(E, Slot, '[Note] Ignored unknown metric(s): ' + Clip(Ignored, LINE_W - 34), CLR_HINT);
   PageHint(E, Slot, Page, Pages, 'maps');
   Remember(E, Slot, QK_TOPMAPSBY, Canon, Page, Pages);
 end;
@@ -864,6 +947,17 @@ begin
     if M^.FastestCapSeconds > 0 then
       Out(E, Slot, Format('Fastest Cap: %s (by %s) | Avg Cap: %s', [MetricText(mfSec, M^.FastestCapSeconds), M^.FastestCapHolder,
         MetricText(mfSec, MapMetricValue(M^, 24))]), WHITE);
+  end;
+
+  { [Bridges] (5.6): how far the hits here flew and for how long, from where their bullet was made }
+  if M^.HitDistCount + M^.KillAirCount > 0 then
+  begin
+    Section(E, Slot, 'Range on this Map', W);
+    Row(E, Slot, ['Longest Hit: ' + MetersText(M^.LongestHit), 'Avg Hit Dist: ' + AvgMetersText(M^.HitDistSum,
+      M^.HitDistCount), 'Avg Hit Air: ' + AvgAirText(M^.HitAirTicks, M^.HitAirCount),
+      'Avg Kill Air: ' + AvgAirText(M^.KillAirTicks, M^.KillAirCount)], COLS4, WHITE);
+    Out(E, Slot, Format('From %s hits and %s kills measured here since 5.6. Per weapon: !mapweapstats',
+      [Num(M^.HitDistCount), Num(M^.KillAirCount)]), CLR_HINT);
   end;
 
   BestKills := 0;

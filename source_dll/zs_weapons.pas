@@ -720,7 +720,7 @@ begin
     Matches := 0;
     Best := HZ_UNKNOWN;
     for z := 0 to 2 do
-      if Round(0.25 * Base * Mods[z]) = Round(Damage) then
+      if (Mods[z] > 0) and (Round(0.25 * Base * Mods[z]) = Round(Damage)) then
       begin
         Inc(Matches);
         Best := z;
@@ -733,6 +733,9 @@ begin
   Best := HZ_UNKNOWN;
   for z := 0 to 2 do
   begin
+    { a zone the weapons file takes no damage on (a modifier of 0) is never the one that was hit }
+    if Mods[z] <= 0 then
+      Continue;
     Rel := Raw / (Base * Mods[z]);
     Err := Abs(Rel - 1.0);
     if Err < BestErr then

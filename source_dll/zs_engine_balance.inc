@@ -31,6 +31,7 @@ const
   BAL_EXPECT_TICKS = 3 * TICKS_PER_SECOND;     { how long an announced join is waited for }
   BAL_SAMPLE_TICKS = 10 * TICKS_PER_SECOND;    { predictions of the running match }
   BAL_REFERENCE_TICKS = 300 * TICKS_PER_SECOND;
+  BAL_SWITCH_GAP = 60 * TICKS_PER_SECOND;      { between two !switch of one player }
   BAL_HISTORY_MAX = 400;
   BAL_NEVER = -1000000000;
 
@@ -171,7 +172,7 @@ end;
 
 function TZSEngine.BalTeams(out TeamNo: TBalTeamNos): LongInt;
 var
-  S, Highest: LongInt;
+  S, T, n, Highest: LongInt;
 begin
   TeamNo[0] := TEAM_ALPHA;
   TeamNo[1] := TEAM_BRAVO;
@@ -182,11 +183,18 @@ begin
     Exit;
   if Cfg.BalanceTeammatchTeams >= 2 then
     Exit(Cfg.BalanceTeammatchTeams);
-  { the teams in use, at least Alpha and Bravo }
+  { the teams in use, at least Alpha and Bravo; Charlie and Delta from two players on: one player
+    alone in a team nobody else plays for would make the balance move others into it }
   Highest := TEAM_BRAVO;
-  for S := 1 to MAX_PLAYERS do
-    if Live[S].Active and (Live[S].Team >= TEAM_ALPHA) and (Live[S].Team <= TEAM_DELTA) then
-      Highest := Max(Highest, Live[S].Team);
+  for T := TEAM_CHARLIE to TEAM_DELTA do
+  begin
+    n := 0;
+    for S := 1 to MAX_PLAYERS do
+      if Live[S].Active and (Live[S].Team = T) and (Live[S].Human or Cfg.BalanceCountBots) then
+        Inc(n);
+    if n >= 2 then
+      Highest := T;
+  end;
   Result := Highest;
 end;
 
@@ -829,13 +837,18 @@ begin
       Inc(DB.Profiles[Idx]^.BalanceMoves);
     DB.Touch(Idx);
   end;
-  if Kind in [BK_AUTO, BK_VOLUNTEER] then
+  { a correction, or a volunteer who evened the match, is a move of the balance: MaxMovesPerMap and
+    the cooldown count it, and a lasting imbalance is counted again from now; a !switch that
+    changed nothing does none of that, or one player could keep the balance away for the map }
+  if (Kind = BK_AUTO) or ((Kind = BK_VOLUNTEER) and Counted) then
   begin
     Bal.LastMoveTick := GameTick;
     Inc(Bal.MovesThisMap);
     Bal.ChanceSince := 0;
     Bal.CountSince := 0;
   end;
+  if Kind = BK_VOLUNTEER then
+    Bal.Slots[S].SwitchUntil := GameTick + BAL_SWITCH_GAP;
 
   AllDone := True;
   if Bal.Pending.Active then
@@ -1402,6 +1415,7 @@ begin
     Bal.Slots[S].Reviewed := True;
     { back in the team the balance moved the player away from: to the team played for before }
     if BalanceActive and (Bal.Slots[S].LockUntil > GameTick) and (Bal.Slots[S].LockTeam = T) and
+       (BalHumansOnTeams >= Cfg.BalanceMinPlayers) and
        (Bal.Slots[S].ReturnTeam >= TEAM_ALPHA) and (Bal.Slots[S].ReturnTeam <> T) and
        (Live[S].Flags and EF_A_FLAGGER = 0) then
     begin
@@ -1425,7 +1439,7 @@ begin
       Continue;
     end;
     D0 := BalGather(Cands, TeamNo, N, P, Ch);
-    if BalHumans(Cands) < 2 then
+    if (BalHumans(Cands) < 2) or (BalHumans(Cands) < Cfg.BalanceMinPlayers) then
       Continue;
     Me := -1;
     for i := 0 to High(Cands) do
@@ -1981,6 +1995,12 @@ begin
     Say(S, '[Balance] You are being moved already.', CLR_WARN);
     Exit;
   end;
+  { the teams change in a moment: two switches at once would both be judged on the teams before }
+  if BalMoveUnderWay(Bal) then
+  begin
+    Say(S, '[Balance] A team change is on its way, try again in a moment.', CLR_WARN);
+    Exit;
+  end;
   { survival kills a player who changes team, and the team would lose a living player in the
     middle of the round: the switch is made while dead, like every move of the balance there }
   if Match.Survival and Live[S].Alive then
@@ -1993,13 +2013,24 @@ begin
   for k := 0 to High(Cands) do
     if Cands[k].Id = S then
       Me := k;
+  { a team the balance does not even (alone in Charlie or Delta with TeammatchTeams = auto) }
   if Me < 0 then
+  begin
+    Say(S, '[Balance] The balance does not even your team: change the team from the menu.', CLR_WARN);
     Exit;
+  end;
   Fav := BalFavored(Ch, N);
   BalTotals(Cands, N, Pow, Cnt);
   Spread0 := BalSpread(Cnt, N);
   TargetD := (Cfg.BalanceTarget - 50) / 100;
   Requested := (Bal.RequestUntil > GameTick) and (Live[S].Team = Bal.RequestFrom);
+  { one !switch of a player every BAL_SWITCH_GAP; a volunteer the balance asks for is always heard }
+  if not Requested and (Bal.Slots[S].SwitchUntil > GameTick) then
+  begin
+    Say(S, Format('[Balance] You changed team a moment ago: !switch again in %d s.',
+      [(Bal.Slots[S].SwitchUntil - GameTick + TICKS_PER_SECOND - 1) div TICKS_PER_SECOND]), CLR_WARN);
+    Exit;
+  end;
   { never back to a locked team, and only to the team asked for while a volunteer is asked for }
   for k := 0 to BAL_MAX_TEAMS - 1 do
     Allowed[k] := (k < N) and not (Requested and (TeamNo[k] <> Bal.RequestTo)) and
@@ -2050,6 +2081,12 @@ begin
   end;
   if Bal.Slots[S].MoveKind <> BK_NONE then
     Exit;
+  { the teams change in a moment: two joins at once would both go to the team short of a player }
+  if BalMoveUnderWay(Bal) then
+  begin
+    Say(S, '[Balance] A team change is on its way, try again in a moment.', CLR_WARN);
+    Exit;
+  end;
   BalGather(Cands, TeamNo, N, P, Ch);
   BalTotals(Cands, N, Pow, Cnt);
   Best := BalBestJoin(Pow, Cnt, N, P, BalPowerOf(S), True, Cfg.BalanceMaxCountDiff, -1, After);
@@ -2349,11 +2386,13 @@ begin
   Snap.Params := BalParamsFor(Snap.TeamCount);
   Snap.Tolerance := Cfg.BalanceJoinTolerance / 100;
   Snap.MaxSpread := Cfg.BalanceMaxCountDiff;
+  Snap.MinPlayers := Cfg.BalanceMinPlayers;
   for S := 1 to MAX_PLAYERS do
   begin
     Snap.Players[S].Active := Live[S].Active;
     Snap.Players[S].Team := Live[S].Team;
     Snap.Players[S].Counts := Live[S].Active and (Live[S].Human or Cfg.BalanceCountBots);
+    Snap.Players[S].Human := Live[S].Active and Live[S].Human;
     if Snap.Players[S].Counts then
       Snap.Players[S].Power := BalPowerOf(S)
     else
@@ -2381,13 +2420,20 @@ begin
   end;
 end;
 
+{ how many players the biggest team has more than the smallest, with one more player in team Plus }
+function BalSpreadWith(Cnt: TBalTeamCounts; TeamCount, Plus: LongInt): LongInt;
+begin
+  Inc(Cnt[Plus]);
+  Result := BalSpread(Cnt, TeamCount);
+end;
+
 { Called by main.pas on the game thread before a player enters Team. The answer is the team to use,
   or -1 to keep a player who already plays where they are. It never waits for the engine. }
 function TZSEngine.TeamJoinAdvice(Slot, Team, OldTeam, Tick: LongInt): LongInt;
 var
   Pow, After: TBalTeamValues;
   Cnt: TBalTeamCounts;
-  k, t, S, Req, Best, Id: LongInt;
+  k, t, S, Req, Best, Id, Humans, Old, Spread: LongInt;
   JoinPower, BestOther: Double;
   IsNew, Known, Locked: Boolean;
   Ev: TZSEvent;
@@ -2451,26 +2497,58 @@ begin
     { a player on the server is known; a new one is taken for the median until the engine knows more }
     if Known then
       JoinPower := FBalSnap.Players[Slot].Power;
-    Best := BalBestJoin(Pow, Cnt, FBalSnap.TeamCount, FBalSnap.Params, JoinPower, True, FBalSnap.MaxSpread, Req, After);
-    Locked := Known and FBalSnap.Players[Slot].Locked and (FBalSnap.Players[Slot].LockTeam = Team);
-    if not Locked and (After[Req] <= After[Best] + FBalSnap.Tolerance) then
-      Result := Team
-    else if Best <> Req then
-      Result := FBalSnap.TeamNo[Best]
+    { fewer humans in the teams than MinPlayers: no strength is judged and no lock holds (three players:
+      the strongest may play alone against the other two). The team asked for is kept unless it leaves
+      the numbers more uneven than MaxCountDiff and than they are; then the smallest team. }
+    Humans := 0;
+    for S := 1 to MAX_PLAYERS do
+      if (S <> Slot) and FBalSnap.Players[S].Active and FBalSnap.Players[S].Human and
+         (BalTeamIndexOf(FBalSnap.TeamNo, FBalSnap.TeamCount, FBalSnap.Players[S].Team) >= 0) then
+        Inc(Humans);
+    if not Known or FBalSnap.Players[Slot].Human then
+      Inc(Humans);
+    if Humans < FBalSnap.MinPlayers then
+    begin
+      Best := 0;
+      for t := 1 to FBalSnap.TeamCount - 1 do
+        if Cnt[t] < Cnt[Best] then
+          Best := t;
+      Old := BalTeamIndexOf(FBalSnap.TeamNo, FBalSnap.TeamCount, OldTeam);
+      if Old < 0 then
+        Old := Best;
+      Spread := BalSpreadWith(Cnt, FBalSnap.TeamCount, Old);
+      if Spread < FBalSnap.MaxSpread then
+        Spread := FBalSnap.MaxSpread;
+      if BalSpreadWith(Cnt, FBalSnap.TeamCount, Req) <= Spread then
+        Result := Team
+      else
+        Result := FBalSnap.TeamNo[Best];
+    end
     else
     begin
-      { the team asked for is the best, but locked: the best of the others }
-      Result := -1;
-      BestOther := 9;
-      for t := 0 to FBalSnap.TeamCount - 1 do
-        if (t <> Req) and (After[t] < BestOther) then
-        begin
-          BestOther := After[t];
-          Result := FBalSnap.TeamNo[t];
-        end;
+      Best := BalBestJoin(Pow, Cnt, FBalSnap.TeamCount, FBalSnap.Params, JoinPower, True, FBalSnap.MaxSpread, Req, After);
+      Locked := Known and FBalSnap.Players[Slot].Locked and (FBalSnap.Players[Slot].LockTeam = Team);
+      if not Locked and (After[Req] <= After[Best] + FBalSnap.Tolerance) then
+        Result := Team
+      else if Best <> Req then
+        Result := FBalSnap.TeamNo[Best]
+      else
+      begin
+        { the team asked for is the best, but locked: the best of the others }
+        Result := -1;
+        BestOther := 9;
+        for t := 0 to FBalSnap.TeamCount - 1 do
+          if (t <> Req) and (After[t] < BestOther) then
+          begin
+            BestOther := After[t];
+            Result := FBalSnap.TeamNo[t];
+          end;
+      end;
     end;
-    { a player who plays in a team stays there instead of being sent somewhere not asked for }
-    if (Result <> Team) and (OldTeam >= TEAM_ALPHA) and (OldTeam <= TEAM_DELTA) then
+    { a player who plays in a team stays there instead of being sent somewhere not asked for; one
+      who leaves a team the balance does not even (Charlie or Delta in CTF, where a script moves him
+      out of it) goes on to the team the balance prefers: a refusal would keep him where he is }
+    if (Result <> Team) and (BalTeamIndexOf(FBalSnap.TeamNo, FBalSnap.TeamCount, OldTeam) >= 0) then
       Result := -1;
     { a new player is never refused: the server would treat that as a full server }
     if IsNew and (Result < TEAM_ALPHA) then

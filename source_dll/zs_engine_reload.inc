@@ -302,7 +302,9 @@ begin
     end;
     { any other rise is another script at work, not a reload }
   end;
-  if Shots > 0 then
+  { with the hook in the server every bullet is a shot of its own (EvBullet): the ammunition then
+    tells only the reloads }
+  if (Shots > 0) and not FBrHook then
   begin
     LiveNoteShot(Live[S], GameTick, W, E.F[0], E.F[1]);
     if Live[S].Human and StatsOn then

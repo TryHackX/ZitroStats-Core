@@ -735,7 +735,7 @@ begin
     k := B.DB.IndexOfSteam('S7003');
     CarolLast := B.DB.Profiles[k]^.LastPlayedTime;
     B.DB.Profiles[k]^.LastPlayedTime := B.DB.NowValue - 100;
-    Pruned := B.DB.PrunePlayerMaps(90);
+    Pruned := B.DB.PrunePlayerMaps(90, 0);
     B.DB.Profiles[k]^.LastPlayedTime := CarolLast;
   finally
     LeaveCriticalSection(B.StateLock);

@@ -255,10 +255,11 @@ begin
   end;
   if MV.ScanAsker >= 0 then
   begin
+    { without the path of the folder, which /zs_maps names from the server folder }
     if D.Error <> '' then
-      Say(MV.ScanAsker, '[Maps] The maps folder could not be read: ' + D.Error, CLR_BAD)
+      Say(MV.ScanAsker, '[Maps] The maps folder could not be read: ' + Copy(D.Error, 1, 56), CLR_BAD)
     else if not D.Found then
-      Say(MV.ScanAsker, '[Maps] The maps folder was not found: ' + D.Folder, CLR_BAD)
+      Say(MV.ScanAsker, '[Maps] The maps folder was not found (/zs_maps names it).', CLR_BAD)
     else
       Say(MV.ScanAsker, Format('[Maps] %d maps in the folder (%d new, %d gone), read in %d ms.', [Length(D.Maps), Added,
         Removed, D.ScanMs]), CLR_GOOD);
@@ -286,6 +287,8 @@ begin
   MV.ChangingUntil := 0;
   if MV.Active then
     MvFinish('cancelled', Format('The script was loaded again: the vote for %s is over.', [MV.Target]), CLR_WARN);
+  { a vote the reload ended was no vote of the players: the next one need not wait }
+  MV.GapUntil := 0;
   { a /recompile (or a reload) while people play: the admins in the game hear that it worked }
   if HumansOnline > 0 then
   begin
@@ -527,6 +530,7 @@ begin
   MV.LastTarget := MV.Target;
   MV.LastResult := Outcome;
   MV.LastEndTick := GameTick;
+  MV.GapUntil := GameTick + Cfg.MapVoteGapSeconds * TICKS_PER_SECOND;
   if MV.Shown then
     MvAction(ACT_VOTE_END, Cfg.MapVoteRestorePercent, '');
   MV.Shown := False;
@@ -718,6 +722,15 @@ begin
       TICKS_PER_SECOND]), CLR_WARN);
     Exit;
   end;
+  { GapSeconds after a vote, whoever starts the next (MvFinish): players who take turns would keep
+    a vote (and Soldat's vote dialog, which blocks a kick vote) on the screens without a pause }
+  Left := MV.GapUntil - GameTick;
+  if Left > 0 then
+  begin
+    Say(Slot, Format('A map vote ended a moment ago: the next one can start in %d s.',
+      [(Left + TICKS_PER_SECOND - 1) div TICKS_PER_SECOND]), CLR_WARN);
+    Exit;
+  end;
   Key := MvStarterKey(Slot);
   Left := MvCooldownLeft(Key);
   if Left > 0 then
@@ -828,4 +841,6 @@ begin
     MV.PrevMap := MV.CurMap;
   MV.CurMap := NewMap;
   MV.MapStartTick := GameTick;
+  { a new map waits BlockAfterChangeSeconds, not the gap after the vote of the map before }
+  MV.GapUntil := 0;
 end;

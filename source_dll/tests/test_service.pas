@@ -137,6 +137,8 @@ begin
     Job.Url := 'ftp://example.com/hook';
     S.Enqueue(Job);
   end;
+  { a hash goes before the webhooks still waiting: let them answer first (each fails at once) }
+  Sleep(1000);
   Job := NewServiceJob(svHash);
   Job.Tag := 77;
   Job.Password := 'pw77';

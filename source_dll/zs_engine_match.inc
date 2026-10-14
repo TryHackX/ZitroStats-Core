@@ -211,9 +211,14 @@ end;
 procedure TZSEngine.BeginMatch(const MapName: AnsiString; GameStyle, ScoreLimit, TimeLimit, Flags: LongInt);
 var
   S, M: LongInt;
+  Running: Boolean;
 begin
   if Match.Active then
     EndMatch(False);
+  { MF_RUNNING: the script started in the middle of the map (a /recompile starts a new engine). The
+    score so far is no point of the last second, the first blood of the match was drawn, the round
+    that runs is no round of this engine, and the map was loaded once already. }
+  Running := Flags and MF_RUNNING <> 0;
   Inc(FMapSerial);
   Match.Active := True;
   Match.MapName := MapName;
@@ -228,17 +233,19 @@ begin
   Match.StartTick := GameTick;
   Match.StartTime := Now;
   FillChar(Match.TeamScore, SizeOf(Match.TeamScore), 0);
+  Match.ScoreKnown := not Running;
   Match.ScoreTick := GameTick;
   FillChar(Match.MaxDeficit, SizeOf(Match.MaxDeficit), 0);
   Match.TimeLeft := 0;
-  Match.FirstBlood := False;
-  Match.RoundFirstBlood := False;
+  Match.FirstBlood := Running;
+  Match.RoundFirstBlood := Running;
   Match.FirstDamage := False;
   FillChar(Match.LastStandGiven, SizeOf(Match.LastStandGiven), 0);
   Match.ClutchSlot := 0;
   Match.ClutchProfile := 0;
-  { a round cut short by the map change is no round; the spawns on the new map start the next }
-  Match.RoundOver := False;
+  { a round cut short by the map change is no round; the spawns on the new map start the next. In a
+    running map the next round starts once two teams stand again (EvTick) or with a spawn. }
+  Match.RoundOver := Running;
   Match.RoundPending := False;
   FillChar(Match.RoundIn, SizeOf(Match.RoundIn), 0);
   Match.Leavers := nil;
@@ -251,7 +258,8 @@ begin
   M := Match.MapIndex;
   if M >= 0 then
   begin
-    Inc(DB.Maps[M].LoadCount);
+    if not Running then
+      Inc(DB.Maps[M].LoadCount);
     { the map runs, whoever plays; LastPlayedTime follows the seconds played with the statistics
       on (SecondAccounting) }
     DB.Maps[M].LastLoadedTime := Now;
@@ -271,6 +279,11 @@ begin
   LoadWeaponsForMode;
   ReloadForgetAll;
   BalMapStart;
+  { the teams of a map that runs are not mixed again as at its start }
+  if Running then
+    Bal.MapStartTick := 0;
+  { [Bridges] MapGeometry: the walls of this map for the engine's rays }
+  GeoLoad(MapName);
 end;
 
 procedure TZSEngine.EvMapAfter(var E: TZSEvent);
@@ -744,9 +757,11 @@ end;
   round once at most one player is left standing, and kills that one itself five seconds later. So
   the round is over when at most one of the humans who spawned in it still lives; who that is, is
   settled once the other deaths of the same tick are in (two players can kill each other at once).
-  Bots send no spawn and no position, so whether a bot lives is not known: with a bot in the game
-  the round is over only when none of the humans lives any more, and the one the server killed at
-  its end (ServerWinner, 0 = the check after a death) is the last one standing. Team games count
+  Bots send no spawn and no position, so without [Bridges] MemoryReads whether a bot lives is not
+  known: with a bot in the game the round is over only when none of the humans lives any more, and
+  the one the server killed at its end (ServerWinner, 0 = the check after a death) is the last one
+  standing. With the reading the bots' lives are known (EvLife) and a bot counts like anybody: a
+  living bot keeps the round going, and a round a bot outlives is won by nobody. Team games count
   their rounds in EvTick; here only from that kill of the server. }
 procedure TZSEngine.RoundCheck(ServerWinner: LongInt);
 var
@@ -780,8 +795,15 @@ begin
   for S := 1 to MAX_PLAYERS do
     if Live[S].Active and (Live[S].Team <> TEAM_SPEC) then
     begin
+      { [Bridges] MemoryReads: the bots' lives are read from the server (EvLife); a bot sends no
+        spawn, so it takes part in every round it lives in }
       if not Live[S].Human then
-        Bots := True
+      begin
+        if not FBrMem then
+          Bots := True
+        else if Live[S].Alive then
+          Inc(Alive);
+      end
       else if Match.RoundIn[S] and Live[S].Alive then
         Inc(Alive);
     end;
@@ -885,14 +907,33 @@ var
   NewScore: array[1..4] of LongInt;
   AliveTeam: array[0..5] of LongInt;
   P: PPlayerProfile;
+  Paused: Boolean;
 begin
-  ReloadDeadlines(E.Tick);
+  { /pause (API 17): the game stands, so its seconds count for nothing; once it goes on, the windows
+    of the game time move on by the length of the pause }
+  Paused := E.I[6] <> 0;
+  if Paused and (FPausedSince = 0) then
+    FPausedSince := Max(1, GameTick)
+  else if not Paused and (FPausedSince <> 0) then
+  begin
+    ShiftTicks(GameTick - FPausedSince, False);
+    FPausedSince := 0;
+  end;
+  if not Paused then
+    ReloadDeadlines(E.Tick);
   for T := 1 to 4 do
     NewScore[T] := E.I[T - 1];
+  { a match the script started in (MF_RUNNING): the first look at the scores only learns them }
+  if not Match.ScoreKnown then
+  begin
+    Match.ScoreKnown := True;
+    for T := 1 to 4 do
+      Match.TeamScore[T] := NewScore[T];
+  end;
   Match.TimeLeft := E.I[4];
   { Game.TimeLeft is 60 * minutes + seconds, so the whole match lasts the time left plus the time
     already played }
-  if Match.Active and (E.I[4] > 0) then
+  if Match.Active and (E.I[4] > 0) and not Paused then
     Match.TotalSeconds := E.I[4] + Max(0, GameTick - Match.StartTick) div TICKS_PER_SECOND;
   if (FStay.MapIndex >= 0) and (GameTick - FStay.EndTick >= STAY_CHECK_TICKS) then
     FinishStayCheck;
@@ -913,13 +954,14 @@ begin
       begin
         { Infiltration and Hold the Flag score by time, Teammatch by kills, so the score says
           nothing about the rounds: the round is over when only one team is still standing. A bot
-          sends no spawn and no position, so a team with a bot may still stand; a round such a team
-          loses ends with the server's kill of the winners (RoundCheck), and a capture in
-          Infiltration ends one at once (EvFlag). }
+          sends no spawn and no position, so without [Bridges] MemoryReads a team with a bot may
+          still stand; a round such a team loses ends with the server's kill of the winners
+          (RoundCheck), and a capture in Infiltration ends one at once (EvFlag). With the reading
+          the bots' lives are known (EvLife) and count like the humans'. }
         FillChar(AliveTeam, SizeOf(AliveTeam), 0);
         for S := 1 to MAX_PLAYERS do
-          if Live[S].Active and (Live[S].Alive or not Live[S].Human) and (Live[S].Team >= TEAM_ALPHA) and
-             (Live[S].Team <= TEAM_DELTA) then
+          if Live[S].Active and (Live[S].Alive or (not Live[S].Human and not FBrMem)) and
+             (Live[S].Team >= TEAM_ALPHA) and (Live[S].Team <= TEAM_DELTA) then
             Inc(AliveTeam[Live[S].Team]);
         k := 0;
         Holder := 0;
@@ -986,9 +1028,11 @@ begin
     Match.TeamScore[T] := NewScore[T];
   Match.ScoreTick := GameTick;
 
-  SecondAccounting;
+  if not Paused then
+    SecondAccounting;
   UpdatePeakOnline;
-  BalanceSecond;
+  if not Paused then
+    BalanceSecond;
   MapVoteSecond;
   { !lastfight: the deaths whose seconds after them are over }
   LastFightSecond(Self);
@@ -999,6 +1043,78 @@ begin
         WelcomePlayer(k);
       RefreshHud(k, False);
     end;
+end;
+
+{ The game time of the engine moves on by Delta against the ticks of the server: at the end of a
+  /pause by its length, so inactivity, camping, the windows of assists, spawn kills and multi kills,
+  reloads and the balance do not see the pause; and by a negative Delta when the tick counter of the
+  server starts again (Wrap), with every tick the engine keeps. GameTick is the tick of now. }
+procedure TZSEngine.ShiftTicks(Delta: LongInt; Wrap: Boolean);
+var
+  S, k: LongInt;
+begin
+  if Delta = 0 then
+    Exit;
+  LiveShiftTicks(Live, Delta, GameTick);
+  Match.StartTick := ShiftTick(Match.StartTick, Delta, GameTick);
+  Match.ScoreTick := ShiftTick(Match.ScoreTick, Delta, GameTick);
+  Match.RoundTick := ShiftTick(Match.RoundTick, Delta, GameTick);
+  Match.CaptureTick := ShiftTick(Match.CaptureTick, Delta, GameTick);
+  Match.LastVoteTick := ShiftTick(Match.LastVoteTick, Delta, GameTick);
+  for S := 1 to MAX_PLAYERS do
+  begin
+    Extra[S].RlStart := ShiftTick(Extra[S].RlStart, Delta, GameTick);
+    Extra[S].RlEarlyUntil := ShiftTick(Extra[S].RlEarlyUntil, Delta, MaxLongInt);
+    Extra[S].RlDeathTick := ShiftTick(Extra[S].RlDeathTick, Delta, GameTick);
+    Bal.Slots[S].FormSince := ShiftTick(Bal.Slots[S].FormSince, Delta, GameTick);
+    Bal.Slots[S].TeamSince := ShiftTick(Bal.Slots[S].TeamSince, Delta, GameTick);
+    Bal.Slots[S].ImmuneUntil := ShiftTick(Bal.Slots[S].ImmuneUntil, Delta, MaxLongInt);
+    Bal.Slots[S].LockUntil := ShiftTick(Bal.Slots[S].LockUntil, Delta, MaxLongInt);
+    Bal.Slots[S].ReviewUntil := ShiftTick(Bal.Slots[S].ReviewUntil, Delta, MaxLongInt);
+    Bal.Slots[S].MoveSent := ShiftTick(Bal.Slots[S].MoveSent, Delta, GameTick);
+  end;
+  for k := 0 to High(Bal.Memory) do
+    Bal.Memory[k].FormSince := ShiftTick(Bal.Memory[k].FormSince, Delta, GameTick);
+  Bal.ChanceSince := ShiftTick(Bal.ChanceSince, Delta, GameTick);
+  Bal.CountSince := ShiftTick(Bal.CountSince, Delta, GameTick);
+  Bal.LastMoveTick := ShiftTick(Bal.LastMoveTick, Delta, GameTick);
+  Bal.LastCheckTick := ShiftTick(Bal.LastCheckTick, Delta, GameTick);
+  Bal.RequestUntil := ShiftTick(Bal.RequestUntil, Delta, MaxLongInt);
+  Bal.MapStartTick := ShiftTick(Bal.MapStartTick, Delta, MaxLongInt);
+  Bal.RefTick := ShiftTick(Bal.RefTick, Delta, GameTick);
+  Bal.PredTick := ShiftTick(Bal.PredTick, Delta, GameTick);
+  Bal.Pending.Created := ShiftTick(Bal.Pending.Created, Delta, GameTick);
+  Bal.Pending.Deadline := ShiftTick(Bal.Pending.Deadline, Delta, MaxLongInt);
+  Bal.Pending.JoinTick[0] := ShiftTick(Bal.Pending.JoinTick[0], Delta, GameTick);
+  Bal.Pending.JoinTick[1] := ShiftTick(Bal.Pending.JoinTick[1], Delta, GameTick);
+  for k := 0 to High(Bal.Expected) do
+    Bal.Expected[k].Tick := ShiftTick(Bal.Expected[k].Tick, Delta, GameTick);
+  { the tick counter started again: also what runs on through a pause - the HUD, the map vote, the
+    check who stayed after a map; !lastfight keeps ticks in every entry and forgets the time before }
+  if Wrap then
+  begin
+    for S := 1 to MAX_PLAYERS do
+    begin
+      Extra[S].HudSentTick := ShiftTick(Extra[S].HudSentTick, Delta, GameTick);
+      for k := 0 to High(Extra[S].HudUntil) do
+        Extra[S].HudUntil[k] := ShiftTick(Extra[S].HudUntil[k], Delta, MaxLongInt);
+      Finalize(Extra[S].Fight);
+      FillChar(Extra[S].Fight, SizeOf(Extra[S].Fight), 0);
+    end;
+    MV.ListTick := ShiftTick(MV.ListTick, Delta, GameTick);
+    MV.StartTick := ShiftTick(MV.StartTick, Delta, GameTick);
+    MV.LastEndTick := ShiftTick(MV.LastEndTick, Delta, GameTick);
+    MV.SoldatUntil := ShiftTick(MV.SoldatUntil, Delta, MaxLongInt);
+    MV.ChangeDue := ShiftTick(MV.ChangeDue, Delta, MaxLongInt);
+    MV.ChangingUntil := ShiftTick(MV.ChangingUntil, Delta, MaxLongInt);
+    MV.MapStartTick := ShiftTick(MV.MapStartTick, Delta, GameTick);
+    MV.KickVoteUntil := ShiftTick(MV.KickVoteUntil, Delta, MaxLongInt);
+    for k := 0 to High(MV.Starters) do
+      MV.Starters[k].UntilTick := ShiftTick(MV.Starters[k].UntilTick, Delta, MaxLongInt);
+    FStay.EndTick := ShiftTick(FStay.EndTick, Delta, GameTick);
+    if FPausedSince <> 0 then
+      FPausedSince := Max(1, ShiftTick(FPausedSince, Delta, GameTick));
+  end;
 end;
 
 procedure TZSEngine.SecondAccounting;
@@ -1060,6 +1176,8 @@ begin
       Inc(Extra[S].SpecSeconds)
     else
       Inc(Extra[S].PlaySeconds);
+    if Extra[S].PlaySeconds + Extra[S].SpecSeconds >= NAME_TIME_FLUSH_SECONDS then
+      NoteNameTime(S);
     Idx := Identity.StatsIndex(S);
     if not DB.Valid(Idx) then
       Continue;
@@ -1136,4 +1254,19 @@ begin
     NoteProtectionActivity(DB, Idx, Cfg);
     DB.Touch(Idx);
   end;
+end;
+
+{ The seconds of the session on the name the player uses (OtherNames: TimePlayed, TimeOnSpectator,
+  "Most played" of the profile) go to the account and start again from 0: every
+  NAME_TIME_FLUSH_SECONDS and at the shutdown; a leave writes them itself (EvLeave). }
+procedure TZSEngine.NoteNameTime(S: LongInt);
+var
+  Idx: LongInt;
+begin
+  Idx := Identity.StatsIndex(S);
+  if not DB.Valid(Idx) or ((Extra[S].PlaySeconds = 0) and (Extra[S].SpecSeconds = 0)) then
+    Exit;
+  DB.NoteName(Idx, Live[S].Name, False, Extra[S].PlaySeconds, Extra[S].SpecSeconds, Cfg.NameHistoryLimit);
+  Extra[S].PlaySeconds := 0;
+  Extra[S].SpecSeconds := 0;
 end;

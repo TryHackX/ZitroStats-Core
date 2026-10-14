@@ -59,9 +59,28 @@ type
     MailTag: LongInt;
     NextAuthAt: Double;
     LoginTargetId: LongInt;
+    ResetTargetId: LongInt;  { the account /forgotpass sent a code for in this session }
     CodeAttempts: LongInt;
+    LoginFails: LongInt;     { wrong passwords typed in this session }
     CachedIndex: LongInt;
     CachedGen: LongWord;
+  end;
+
+  { wrong passwords from one source on one account: Key is 'H' + the HWID, 'N' + the network
+    (IpPrefix), or 'P' + HWID + '|' + network for a computer of the account itself; 'C' counts
+    the wrong reset codes of the account, from every session }
+  TLoginFailRec = record
+    ProfileId: LongInt;
+    Key: AnsiString;
+    Count: LongInt;
+    Since: Double;
+    LockUntil: Double;
+  end;
+
+  { the e-mails asked for today from one source: Key is 'H' + the HWID or 'N' + the network }
+  TMailSourceRec = record
+    Key: AnsiString;
+    Count: LongInt;
   end;
 
   TIdentityHost = class
@@ -91,7 +110,12 @@ type
     FNextTag: LongInt;
     FSerial: LongWord;
     FAdminOps: array of TAdminOp;
+    FFails: array of TLoginFailRec;
+    FMailDay: LongInt;
+    FMailToday: LongInt;
+    FMailSources: array of TMailSourceRec;
     function NowT: Double; inline;
+    function SecNow: Double;
     function NextTag: LongInt;
     procedure ResetSlot(Slot: LongInt);
     procedure Tell(Slot: LongInt; const Text: AnsiString; Color: LongInt);
@@ -107,12 +131,18 @@ type
     procedure AddTrustedDevice(Index: LongInt; const Hwid, IP: AnsiString);
     procedure DropTrustedDevices(Index: LongInt; const KeepHwid, KeepIP: AnsiString);
     function DeviceTrusted(const P: TPlayerProfile; const Hwid, IP: AnsiString): Boolean;
+    function OwnComputer(const P: TPlayerProfile; const Hwid: AnsiString): Boolean;
+    function SourceKeys(Slot: LongInt; const P: TPlayerProfile): TStringArray;
+    function FailRecord(ProfileId: LongInt; const Key: AnsiString; Add: Boolean): LongInt;
+    function LoginLockEnd(Slot, Index: LongInt): Double;
+    function LoginLockMinutes(Slot, Index: LongInt): LongInt;
     function ValidPassword(const Pw, Name: AnsiString; out Msg: AnsiString): Boolean;
     function AuthThrottled(Slot: LongInt): Boolean;
     function SubmitHash(Slot, Op, ProfileId: LongInt; const Pw, Salt: AnsiString; Iter: LongInt;
       const Pw2, Salt2: AnsiString; Iter2: LongInt = 0): Boolean;
     function FindAccountArg(const Arg: AnsiString): LongInt;
-    function MailAllowed(Index: LongInt; out Msg: AnsiString): Boolean;
+    function MailAllowed(Slot, Index: LongInt; out Msg: AnsiString): Boolean;
+    function MailsFromSource(Slot: LongInt; Add: Boolean): LongInt;
     function SendCodeMail(Slot, Index, Op: LongInt; const Address, Code: AnsiString): Boolean;
     procedure LoginSucceeded(Slot, Index: LongInt);
     procedure LoginFailed(Slot, Index: LongInt; const What: AnsiString);
@@ -147,15 +177,18 @@ type
 function NormalizeSteam(const S: AnsiString): AnsiString;
 function IpPrefix(const IP: AnsiString): AnsiString;
 function IsRegistered(const P: TPlayerProfile): Boolean;
-function CodeHash(ProfileId: LongInt; const Code: AnsiString): AnsiString;
+{ the stored form of an e-mail code: keyed with the salt of the account's password (SaltHex) }
+function CodeHash(ProfileId: LongInt; const SaltHex, Code: AnsiString): AnsiString;
 function IsDisposableProfile(const P: TPlayerProfile): Boolean;
 
 implementation
 
 const
   DAY_SECONDS = 86400.0;
-  MAX_TRUSTED_DEVICES = 8;
   MAX_CODE_ATTEMPTS = 5;
+  MAX_FAIL_RECORDS = 4096;
+  CODE_LENGTH = 12;
+  CODE_HASH_TAG = 'k1:';
   COMMON_PASSWORDS: array[0..14] of AnsiString = ('123456', '1234567', '12345678', '123456789',
     'password', 'qwerty', 'qwerty123', 'soldat', 'soldat1', '111111', 'abc123', 'haslo',
     'haslo123', 'zaq12wsx', 'polska');
@@ -216,9 +249,19 @@ begin
   Result := P.PassHash <> '';
 end;
 
-function CodeHash(ProfileId: LongInt; const Code: AnsiString): AnsiString;
+{ A code has CODE_LENGTH characters of 32 (60 bits) and its hash is keyed with the salt of the
+  password: a copy of the record (Engine = mysql, a website) does not give the code away to a
+  search within its lifetime. The tag marks hashes of this kind - the unkeyed hash of a code of
+  5.6 is no code at all. }
+function CodeHash(ProfileId: LongInt; const SaltHex, Code: AnsiString): AnsiString;
 begin
-  Result := BytesToHex(DigestToStr(Sha256Str(IntToStr(ProfileId) + ':' + UpperCase(Trim(Code)))));
+  Result := CODE_HASH_TAG + BytesToHex(DigestToStr(HmacSha256(HexToBytes(SaltHex),
+    IntToStr(ProfileId) + ':' + UpperCase(Trim(Code)))));
+end;
+
+function IsCodeHash(const H: AnsiString): Boolean;
+begin
+  Result := (Length(H) > Length(CODE_HASH_TAG)) and (Copy(H, 1, Length(CODE_HASH_TAG)) = CODE_HASH_TAG);
 end;
 
 function IsDisposableProfile(const P: TPlayerProfile): Boolean;
@@ -245,6 +288,13 @@ end;
 function TIdentityManager.NowT: Double;
 begin
   Result := FDB.NowValue;
+end;
+
+{ the security times of an account (locks, codes, trusted computers, the date of the password, the
+  last e-mail) are kept in UTC: with Engine = mysql servers in other time zones read them too }
+function TIdentityManager.SecNow: Double;
+begin
+  Result := LocalToUtc(FDB.NowValue);
 end;
 
 function TIdentityManager.NextTag: LongInt;
@@ -604,6 +654,7 @@ var
   S: ^TSlotIdentity;
   Act: AnsiString;
   Idx: LongInt;
+  LockEnd: Double;
 begin
   for Slot := 1 to MAX_PLAYERS do
   begin
@@ -626,6 +677,15 @@ begin
       Tell(Slot, Format('Account #%d of this computer is password protected.', [FDB.Profiles[Idx]^.ID]), CLR_WARN);
       Tell(Slot, 'Log in: /login <password> - stats are not saved until then.', CLR_WARN);
       S^.NextReminder := NowT + FCfg^.LoginReminderSeconds / DAY_SECONDS;
+    end;
+    { a player who cannot log in because of somebody else's wrong passwords is neither moved nor
+      kicked: the countdown starts again when the lock ends }
+    if not S^.GraceActionDone and (NowT - S^.LockSince >= FCfg^.LoginGraceSeconds / DAY_SECONDS) and
+       FDB.Valid(Idx) and (S^.LoginFails < Max(1, FCfg^.LoginMaxAttempts)) then
+    begin
+      LockEnd := LoginLockEnd(Slot, Idx);
+      if LockEnd > SecNow then
+        S^.LockSince := NowT + (LockEnd - SecNow);
     end;
     if not S^.GraceActionDone and (NowT - S^.LockSince >= FCfg^.LoginGraceSeconds / DAY_SECONDS) then
     begin
@@ -661,7 +721,7 @@ begin
   Prefix := IpPrefix(IP);
   FDB.BeginIdentityChange(Index);
   for k := High(P^.TrustedDevices) downto 0 do
-    if (P^.TrustedDevices[k].Expire < NowT) or
+    if (P^.TrustedDevices[k].Expire < SecNow) or
        (SameText(P^.TrustedDevices[k].HWID, Hwid) and (P^.TrustedDevices[k].IPPrefix = Prefix)) then
     begin
       for j := k to High(P^.TrustedDevices) - 1 do
@@ -682,8 +742,8 @@ begin
   SetLength(P^.TrustedDevices, n + 1);
   P^.TrustedDevices[n].HWID := Hwid;
   P^.TrustedDevices[n].IPPrefix := Prefix;
-  P^.TrustedDevices[n].Expire := NowT + FCfg^.TrustedDeviceDays;
-  P^.TrustedDevices[n].LastUsed := NowT;
+  P^.TrustedDevices[n].Expire := SecNow + FCfg^.TrustedDeviceDays;
+  P^.TrustedDevices[n].LastUsed := SecNow;
   FDB.EndIdentityChange(Index);
   FDB.Touch(Index);
 end;
@@ -708,10 +768,141 @@ begin
   Result := False;
   if (Hwid = '') or not FCfg^.TrustedDevicesEnabled or P.NoTrustedDevices then
     Exit;
+  { a computer trusted before the password was set or changed is not trusted any more (LastUsed is
+    the moment it was added; every new password keeps only the current computer, added with the
+    same time), whatever a merge of the database brings back }
   for k := 0 to High(P.TrustedDevices) do
-    if SameText(P.TrustedDevices[k].HWID, Hwid) and (P.TrustedDevices[k].Expire >= NowT) and
+    if SameText(P.TrustedDevices[k].HWID, Hwid) and (P.TrustedDevices[k].Expire >= SecNow) and
+       (P.TrustedDevices[k].LastUsed >= P.PassSetTime) and
        (not FCfg^.TrustDeviceSameIP or (P.TrustedDevices[k].IPPrefix = IpPrefix(IP))) then
       Exit(True);
+end;
+
+{ a computer of the account itself: the one it was last played on, or one it trusts (on any network) }
+function TIdentityManager.OwnComputer(const P: TPlayerProfile; const Hwid: AnsiString): Boolean;
+var
+  k: LongInt;
+begin
+  Result := False;
+  if Hwid = '' then
+    Exit;
+  if SameText(P.ActiveHWID, Hwid) then
+    Exit(True);
+  for k := 0 to High(P.TrustedDevices) do
+    if SameText(P.TrustedDevices[k].HWID, Hwid) and (P.TrustedDevices[k].Expire >= SecNow) and
+       (P.TrustedDevices[k].LastUsed >= P.PassSetTime) then
+      Exit(True);
+end;
+
+{ The sources wrong passwords on account P are counted for, each on its own: the computer and the
+  network of the session. A computer of the account itself counts as itself on this network only,
+  so neither somebody else in the same network nor a copy of its HWID elsewhere locks the owner. }
+function TIdentityManager.SourceKeys(Slot: LongInt; const P: TPlayerProfile): TStringArray;
+var
+  S: ^TSlotIdentity;
+  Net: AnsiString;
+  n: LongInt;
+begin
+  S := @Slots[Slot];
+  Net := IpPrefix(S^.IP);
+  SetLength(Result, 2);
+  n := 0;
+  if OwnComputer(P, S^.Hwid) then
+  begin
+    Result[0] := 'P' + UpperCase(S^.Hwid) + '|' + Net;
+    n := 1;
+  end
+  else
+  begin
+    if S^.Hwid <> '' then
+    begin
+      Result[n] := 'H' + UpperCase(S^.Hwid);
+      Inc(n);
+    end;
+    if Net <> '' then
+    begin
+      Result[n] := 'N' + Net;
+      Inc(n);
+    end;
+  end;
+  if n = 0 then
+  begin
+    Result[0] := 'X';
+    n := 1;
+  end;
+  SetLength(Result, n);
+end;
+
+{ the record of a source on an account, -1 when there is none (Add: a new one); records nobody
+  needs any more go first, and the table never holds more than a few thousand }
+function TIdentityManager.FailRecord(ProfileId: LongInt; const Key: AnsiString; Add: Boolean): LongInt;
+var
+  k, n, Oldest: LongInt;
+  Window: Double;
+begin
+  for k := 0 to High(FFails) do
+    if (FFails[k].ProfileId = ProfileId) and (FFails[k].Key = Key) then
+      Exit(k);
+  Result := -1;
+  if not Add then
+    Exit;
+  Window := Max(Max(1, FCfg^.LoginLockMinutes), Max(1, FCfg^.MailCodeMinutes)) / 1440;
+  n := 0;
+  for k := 0 to High(FFails) do
+    if (FFails[k].LockUntil > SecNow) or (SecNow - FFails[k].Since <= Window) then
+    begin
+      FFails[n] := FFails[k];
+      Inc(n);
+    end;
+  SetLength(FFails, n);
+  if n >= MAX_FAIL_RECORDS then
+  begin
+    Oldest := 0;
+    for k := 1 to High(FFails) do
+      if FFails[k].Since < FFails[Oldest].Since then
+        Oldest := k;
+    FFails[Oldest] := FFails[High(FFails)];
+    SetLength(FFails, High(FFails));
+  end;
+  Result := Length(FFails);
+  SetLength(FFails, Result + 1);
+  FFails[Result].ProfileId := ProfileId;
+  FFails[Result].Key := Key;
+  FFails[Result].Count := 0;
+  FFails[Result].Since := SecNow;
+  FFails[Result].LockUntil := 0;
+end;
+
+{ the end (UTC) of what stops this session from trying a password on the account at Index: a lock
+  of its own source, or the lock of the whole account after many wrong passwords from everywhere;
+  a time that has passed means no lock }
+function TIdentityManager.LoginLockEnd(Slot, Index: LongInt): Double;
+var
+  P: PPlayerProfile;
+  Keys: TStringArray;
+  i, k: LongInt;
+begin
+  P := FDB.Profiles[Index];
+  Result := P^.LoginLockUntil;
+  Keys := SourceKeys(Slot, P^);
+  for i := 0 to High(Keys) do
+  begin
+    k := FailRecord(P^.ID, Keys[i], False);
+    if (k >= 0) and (FFails[k].LockUntil > Result) then
+      Result := FFails[k].LockUntil;
+  end;
+end;
+
+{ minutes until this session may try a password on the account at Index again (0 = now) }
+function TIdentityManager.LoginLockMinutes(Slot, Index: LongInt): LongInt;
+var
+  LockEnd: Double;
+begin
+  LockEnd := LoginLockEnd(Slot, Index);
+  if LockEnd > SecNow then
+    Result := Trunc((LockEnd - SecNow) * 1440) + 1
+  else
+    Result := 0;
 end;
 
 function TIdentityManager.ValidPassword(const Pw, Name: AnsiString; out Msg: AnsiString): Boolean;
@@ -823,7 +1014,7 @@ begin
     end;
 end;
 
-function TIdentityManager.MailAllowed(Index: LongInt; out Msg: AnsiString): Boolean;
+function TIdentityManager.MailAllowed(Slot, Index: LongInt; out Msg: AnsiString): Boolean;
 var
   P: PPlayerProfile;
   Today, WaitMin: LongInt;
@@ -841,13 +1032,71 @@ begin
     Msg := 'The e-mail limit for today is reached. Try again tomorrow.';
     Exit;
   end;
-  if (P^.MailLastSent > 0) and ((NowT - P^.MailLastSent) * 1440 < FCfg^.MailMinIntervalMinutes) then
+  if (P^.MailLastSent > 0) and ((SecNow - P^.MailLastSent) * 1440 < FCfg^.MailMinIntervalMinutes) then
   begin
-    WaitMin := Trunc(FCfg^.MailMinIntervalMinutes - (NowT - P^.MailLastSent) * 1440) + 1;
+    WaitMin := Trunc(FCfg^.MailMinIntervalMinutes - (SecNow - P^.MailLastSent) * 1440) + 1;
     Msg := Format('Please wait %d min before requesting another e-mail.', [WaitMin]);
     Exit;
   end;
+  { the limits of the account are not enough: an account is easy to make. The server sends at most
+    MaxPerDayServer a day, and one computer or network asks for at most MaxPerDaySource }
+  if FMailDay <> Today then
+  begin
+    FMailDay := Today;
+    FMailToday := 0;
+    FMailSources := nil;
+  end;
+  if FMailToday >= Max(1, FCfg^.MailMaxPerDayServer) then
+  begin
+    Msg := 'The server has sent all its e-mails for today. Try again tomorrow.';
+    Exit;
+  end;
+  if MailsFromSource(Slot, False) >= Max(1, FCfg^.MailMaxPerDaySource) then
+  begin
+    Msg := 'Too many e-mails were asked for from your computer today. Try again tomorrow.';
+    Exit;
+  end;
   Result := True;
+end;
+
+{ the e-mails asked for today from the computer and from the network of a session, the larger of
+  the two; Add counts one more for both }
+function TIdentityManager.MailsFromSource(Slot: LongInt; Add: Boolean): LongInt;
+var
+  Keys: array[0..1] of AnsiString;
+  i, k, n: LongInt;
+begin
+  Result := 0;
+  Keys[0] := '';
+  Keys[1] := '';
+  if Slots[Slot].Hwid <> '' then
+    Keys[0] := 'H' + UpperCase(Slots[Slot].Hwid);
+  if IpPrefix(Slots[Slot].IP) <> '' then
+    Keys[1] := 'N' + IpPrefix(Slots[Slot].IP);
+  for i := 0 to 1 do
+  begin
+    if Keys[i] = '' then
+      Continue;
+    k := -1;
+    for n := 0 to High(FMailSources) do
+      if FMailSources[n].Key = Keys[i] then
+      begin
+        k := n;
+        Break;
+      end;
+    if (k < 0) and Add then
+    begin
+      k := Length(FMailSources);
+      SetLength(FMailSources, k + 1);
+      FMailSources[k].Key := Keys[i];
+      FMailSources[k].Count := 0;
+    end;
+    if k < 0 then
+      Continue;
+    if Add then
+      Inc(FMailSources[k].Count);
+    Result := Max(Result, FMailSources[k].Count);
+  end;
 end;
 
 { False when the service queue refused the mail: nothing was sent and nothing counts against the
@@ -856,10 +1105,9 @@ function TIdentityManager.SendCodeMail(Slot, Index, Op: LongInt; const Address, 
 var
   P: PPlayerProfile;
   Job: TServiceJob;
-  Name, Server: AnsiString;
+  Server: AnsiString;
 begin
   P := FDB.Profiles[Index];
-  Name := CpToUtf8(P^.ActiveName, FCfg^.SourceCodepage);
   Server := CpToUtf8(FCfg^.MailServerName, FCfg^.SourceCodepage);
   Job := NewServiceJob(svMail);
   Job.Tag := NextTag;
@@ -870,8 +1118,9 @@ begin
   if Op = AUTH_MAIL_VERIFY then
   begin
     Job.Subject := Server + ': e-mail verification';
-    Job.Body := 'Hello ' + Name + ',' + LineEnding + LineEnding +
-      'your e-mail verification code is:' + LineEnding + LineEnding +
+    { no name of a player in the text: anybody can choose any name (the account number is enough) }
+    Job.Body := 'Hello,' + LineEnding + LineEnding +
+      'the e-mail verification code for account #' + IntToStr(P^.ID) + ' is:' + LineEnding + LineEnding +
       '    ' + Code + LineEnding + LineEnding +
       'Type in game: /verifyemail ' + Code + LineEnding +
       'The code is valid for ' + IntToStr(FCfg^.MailCodeMinutes) + ' minutes.' + LineEnding + LineEnding +
@@ -880,8 +1129,8 @@ begin
   else
   begin
     Job.Subject := Server + ': password reset';
-    Job.Body := 'Hello ' + Name + ',' + LineEnding + LineEnding +
-      'your password reset code is:' + LineEnding + LineEnding +
+    Job.Body := 'Hello,' + LineEnding + LineEnding +
+      'the password reset code for account #' + IntToStr(P^.ID) + ' is:' + LineEnding + LineEnding +
       '    ' + Code + LineEnding + LineEnding +
       'Type in game: /resetpass ' + Code + ' <new password> <new password>' + LineEnding +
       'The code is valid for ' + IntToStr(FCfg^.MailCodeMinutes) + ' minutes.' + LineEnding + LineEnding +
@@ -894,20 +1143,39 @@ begin
     Exit;
   end;
   Slots[Slot].MailTag := Job.Tag;
-  P^.MailLastSent := NowT;
+  P^.MailLastSent := SecNow;
   Inc(P^.MailSentToday);
   FDB.Touch(Index);
+  Inc(FMailToday);
+  MailsFromSource(Slot, True);
+  if FMailToday = Max(1, FCfg^.MailMaxPerDayServer) then
+    FHost.Audit(Format('mail: the limit of the server for today is reached ([Mail] MaxPerDayServer = %d)',
+      [FMailToday]));
 end;
 
 procedure TIdentityManager.LoginSucceeded(Slot, Index: LongInt);
 var
   S: ^TSlotIdentity;
   P: PPlayerProfile;
+  Keys: TStringArray;
+  i, k: LongInt;
 begin
   S := @Slots[Slot];
   P := FDB.Profiles[Index];
   P^.LoginFailCount := 0;
   P^.LoginLockUntil := 0;
+  { the wrong passwords of this source are forgotten too }
+  Keys := SourceKeys(Slot, P^);
+  for i := 0 to High(Keys) do
+  begin
+    k := FailRecord(P^.ID, Keys[i], False);
+    if k >= 0 then
+    begin
+      FFails[k].Count := 0;
+      FFails[k].LockUntil := 0;
+    end;
+  end;
+  S^.LoginFails := 0;
   { two sessions may have asked at the same time, and the password is checked on another thread:
     the account is played by one of them only }
   if PlayedElsewhere(P^.ID, Slot) then
@@ -935,29 +1203,61 @@ begin
   end;
 end;
 
+{ A wrong password locks the source it came from after LoginMaxAttempts (its computer or its
+  network, SourceKeys), never the owner somewhere else; the account itself is locked for everybody
+  only after LoginMaxAttemptsAccount wrong passwords from all sources together. }
 procedure TIdentityManager.LoginFailed(Slot, Index: LongInt; const What: AnsiString);
 var
   P: PPlayerProfile;
-  Limit: LongInt;
+  Limit, Shown, i, k: LongInt;
+  Keys: TStringArray;
+  SourceLocked: Boolean;
 begin
   P := FDB.Profiles[Index];
+  Limit := Max(1, FCfg^.LoginMaxAttempts);
+  Inc(Slots[Slot].LoginFails);
+  Keys := SourceKeys(Slot, P^);
+  Shown := 0;
+  SourceLocked := False;
+  for i := 0 to High(Keys) do
+  begin
+    k := FailRecord(P^.ID, Keys[i], True);
+    if (FFails[k].Count > 0) and (SecNow - FFails[k].Since > Max(1, FCfg^.LoginLockMinutes) / 1440) then
+      FFails[k].Count := 0;
+    if FFails[k].Count = 0 then
+      FFails[k].Since := SecNow;
+    Inc(FFails[k].Count);
+    if FFails[k].Count >= Limit then
+    begin
+      FFails[k].Count := 0;
+      FFails[k].LockUntil := SecNow + Max(1, FCfg^.LoginLockMinutes) / 1440;
+      SourceLocked := True;
+    end
+    else if FFails[k].Count > Shown then
+      Shown := FFails[k].Count;
+  end;
   { failures count within the lock time: a password mistyped weeks ago does not add up to a lock }
-  if (P^.LoginFailCount > 0) and (NowT - P^.LoginFailSince > Max(1, FCfg^.LoginLockMinutes) / 1440) then
+  if (P^.LoginFailCount > 0) and (SecNow - P^.LoginFailSince > Max(1, FCfg^.LoginLockMinutes) / 1440) then
     P^.LoginFailCount := 0;
   if P^.LoginFailCount = 0 then
-    P^.LoginFailSince := NowT;
+    P^.LoginFailSince := SecNow;
   Inc(P^.LoginFailCount);
-  Limit := Max(1, FCfg^.LoginMaxAttempts);
-  if P^.LoginFailCount >= Limit then
+  if P^.LoginFailCount >= Max(Limit, FCfg^.LoginMaxAttemptsAccount) then
   begin
     P^.LoginFailCount := 0;
-    P^.LoginLockUntil := NowT + Max(1, FCfg^.LoginLockMinutes) / 1440;
+    P^.LoginLockUntil := SecNow + Max(1, FCfg^.LoginLockMinutes) / 1440;
     Tell(Slot, Format('%s The account is locked for %d min.', [What, Max(1, FCfg^.LoginLockMinutes)]), CLR_BAD);
     FHost.Audit(Format('account #%d (%s): locked after failed logins, last from %s',
       [P^.ID, P^.ActiveName, Slots[Slot].IP]));
   end
+  else if SourceLocked then
+  begin
+    Tell(Slot, Format('%s Logins to this account from here are locked for %d min.',
+      [What, Max(1, FCfg^.LoginLockMinutes)]), CLR_BAD);
+    FHost.Audit(Format('account #%d: logins from %s locked after failed attempts', [P^.ID, Slots[Slot].IP]));
+  end
   else
-    Tell(Slot, Format('%s (%d/%d)', [What, P^.LoginFailCount, Limit]), CLR_BAD);
+    Tell(Slot, Format('%s (%d/%d)', [What, Shown, Limit]), CLR_BAD);
   FDB.Touch(Index);
 end;
 
@@ -1122,9 +1422,9 @@ begin
     Tell(Slot, 'That account is already playing on this server.', CLR_BAD);
     Exit;
   end;
-  if P^.LoginLockUntil > NowT then
+  Mins := LoginLockMinutes(Slot, Target);
+  if Mins > 0 then
   begin
-    Mins := Trunc((P^.LoginLockUntil - NowT) * 1440) + 1;
     Tell(Slot, Format('Too many failed attempts. Try again in %d min.', [Mins]), CLR_BAD);
     Exit;
   end;
@@ -1169,7 +1469,7 @@ begin
     Tell(Slot, Msg, CLR_BAD);
     Exit;
   end;
-  if P^.LoginLockUntil > NowT then
+  if LoginLockMinutes(Slot, Idx) > 0 then
   begin
     Tell(Slot, 'Too many failed attempts. Try again later.', CLR_BAD);
     Exit;
@@ -1209,7 +1509,7 @@ begin
     Exit;
   end;
   P := FDB.Profiles[Idx];
-  if P^.LoginLockUntil > NowT then
+  if LoginLockMinutes(Slot, Idx) > 0 then
   begin
     Tell(Slot, 'Too many failed attempts. Try again later.', CLR_BAD);
     Exit;
@@ -1251,20 +1551,20 @@ begin
     Tell(Slot, 'This e-mail address is not valid.', CLR_BAD);
     Exit;
   end;
-  if not MailAllowed(Idx, Msg) then
+  if not MailAllowed(Slot, Idx, Msg) then
   begin
     Tell(Slot, Msg, CLR_WARN);
     Exit;
   end;
   if AuthThrottled(Slot) then
     Exit;
-  Code := RandomCode(8);
+  Code := RandomCode(CODE_LENGTH);
   Sent := SendCodeMail(Slot, Idx, AUTH_MAIL_VERIFY, Addr, Code);
   if Sent then
   begin
     P^.EmailPending := Addr;
-    P^.EmailCodeHash := CodeHash(P^.ID, Code);
-    P^.EmailCodeExpire := NowT + Max(1, FCfg^.MailCodeMinutes) / 1440;
+    P^.EmailCodeHash := CodeHash(P^.ID, P^.PassSalt, Code);
+    P^.EmailCodeExpire := SecNow + Max(1, FCfg^.MailCodeMinutes) / 1440;
     S^.CodeAttempts := 0;
   end;
   WipeString(Code);
@@ -1296,7 +1596,8 @@ begin
     Tell(Slot, 'No e-mail is waiting for verification. Use /setemail <address>', CLR_WARN);
     Exit;
   end;
-  if (P^.EmailCodeExpire < NowT) or (S^.CodeAttempts >= MAX_CODE_ATTEMPTS) then
+  if (P^.EmailCodeExpire < SecNow) or not IsCodeHash(P^.EmailCodeHash) or
+     (S^.CodeAttempts >= MAX_CODE_ATTEMPTS) then
   begin
     P^.EmailCodeHash := '';
     P^.EmailCodeExpire := 0;
@@ -1304,10 +1605,19 @@ begin
     Tell(Slot, 'The code is no longer valid. Request a new one: /setemail <address>', CLR_BAD);
     Exit;
   end;
-  if not ConstantTimeEquals(CodeHash(P^.ID, W[1]), P^.EmailCodeHash) then
+  if not ConstantTimeEquals(CodeHash(P^.ID, P^.PassSalt, W[1]), P^.EmailCodeHash) then
   begin
     Inc(S^.CodeAttempts);
-    Tell(Slot, Format('Wrong code (%d/%d).', [S^.CodeAttempts, MAX_CODE_ATTEMPTS]), CLR_BAD);
+    { the fifth wrong code ends the code }
+    if S^.CodeAttempts >= MAX_CODE_ATTEMPTS then
+    begin
+      P^.EmailCodeHash := '';
+      P^.EmailCodeExpire := 0;
+      FDB.Touch(Idx);
+      Tell(Slot, 'Wrong code. The code is no longer valid. Request a new one: /setemail <address>', CLR_BAD);
+    end
+    else
+      Tell(Slot, Format('Wrong code (%d/%d).', [S^.CodeAttempts, MAX_CODE_ATTEMPTS]), CLR_BAD);
     Exit;
   end;
   P^.Email := P^.EmailPending;
@@ -1323,7 +1633,7 @@ end;
 procedure TIdentityManager.CmdForgotPass(Slot: LongInt; const W: TStringArray);
 var
   S: ^TSlotIdentity;
-  Target, Cur: LongInt;
+  Target, Cur, k: LongInt;
   P: PPlayerProfile;
   Code, Msg: AnsiString;
   Sent: Boolean;
@@ -1357,22 +1667,29 @@ begin
     Tell(Slot, 'This account has no verified e-mail. Ask an admin for help.', CLR_BAD);
     Exit;
   end;
-  if not MailAllowed(Target, Msg) then
+  if not MailAllowed(Slot, Target, Msg) then
   begin
     Tell(Slot, Msg, CLR_WARN);
     Exit;
   end;
   if AuthThrottled(Slot) then
     Exit;
-  Code := RandomCode(8);
+  Code := RandomCode(CODE_LENGTH);
   { a code that never left the server does not replace one that may be on its way }
   Sent := SendCodeMail(Slot, Target, AUTH_MAIL_RESET, P^.Email, Code);
   if Sent then
   begin
-    P^.ResetCodeHash := CodeHash(P^.ID, Code);
-    P^.ResetCodeExpire := NowT + Max(1, FCfg^.MailCodeMinutes) / 1440;
+    P^.ResetCodeHash := CodeHash(P^.ID, P^.PassSalt, Code);
+    P^.ResetCodeExpire := SecNow + Max(1, FCfg^.MailCodeMinutes) / 1440;
     S^.LoginTargetId := P^.ID;
-    S^.CodeAttempts := 0;
+    S^.ResetTargetId := P^.ID;
+    { a new code gets five tries of its own }
+    k := FailRecord(P^.ID, 'C', False);
+    if k >= 0 then
+    begin
+      FFails[k].Count := 0;
+      FFails[k].Since := SecNow;
+    end;
   end;
   WipeString(Code);
   if not Sent then
@@ -1385,7 +1702,7 @@ end;
 procedure TIdentityManager.CmdResetPass(Slot: LongInt; const W: TStringArray);
 var
   S: ^TSlotIdentity;
-  Target: LongInt;
+  Target, k: LongInt;
   P: PPlayerProfile;
   Msg, Salt: AnsiString;
 begin
@@ -1395,7 +1712,9 @@ begin
     Tell(Slot, 'Usage: /resetpass <code> <new password> <new password>', CLR_HINT);
     Exit;
   end;
-  Target := FDB.IndexOfId(S^.LoginTargetId);
+  { the account this session asked a code for - /login #id does not choose it - or, for a session
+    waiting for /login on a registered account, that account }
+  Target := FDB.IndexOfId(S^.ResetTargetId);
   if not FDB.Valid(Target) and S^.Locked then
     Target := ProfileIndex(Slot);
   if not FDB.Valid(Target) or not IsRegistered(FDB.Profiles[Target]^) then
@@ -1404,7 +1723,7 @@ begin
     Exit;
   end;
   P := FDB.Profiles[Target];
-  if (P^.ResetCodeHash = '') or (P^.ResetCodeExpire < NowT) or (S^.CodeAttempts >= MAX_CODE_ATTEMPTS) then
+  if not IsCodeHash(P^.ResetCodeHash) or (P^.ResetCodeExpire < SecNow) then
   begin
     P^.ResetCodeHash := '';
     P^.ResetCodeExpire := 0;
@@ -1412,10 +1731,23 @@ begin
     Tell(Slot, 'No valid reset code. Request a new one: /forgotpass', CLR_BAD);
     Exit;
   end;
-  if not ConstantTimeEquals(CodeHash(P^.ID, W[1]), P^.ResetCodeHash) then
+  if not ConstantTimeEquals(CodeHash(P^.ID, P^.PassSalt, W[1]), P^.ResetCodeHash) then
   begin
-    Inc(S^.CodeAttempts);
-    Tell(Slot, Format('Wrong code (%d/%d).', [S^.CodeAttempts, MAX_CODE_ATTEMPTS]), CLR_BAD);
+    { wrong codes count on the account, from every session and every join: the fifth ends the code }
+    k := FailRecord(P^.ID, 'C', True);
+    Inc(FFails[k].Count);
+    if FFails[k].Count >= MAX_CODE_ATTEMPTS then
+    begin
+      FFails[k].Count := 0;
+      P^.ResetCodeHash := '';
+      P^.ResetCodeExpire := 0;
+      FDB.Touch(Target);
+      FHost.Audit(Format('account #%d: password reset code ended after %d wrong codes, the last from %s',
+        [P^.ID, MAX_CODE_ATTEMPTS, S^.IP]));
+      Tell(Slot, 'Wrong code. The code is no longer valid. Request a new one: /forgotpass', CLR_BAD);
+    end
+    else
+      Tell(Slot, Format('Wrong code (%d/%d).', [FFails[k].Count, MAX_CODE_ATTEMPTS]), CLR_BAD);
     Exit;
   end;
   if W[2] <> W[3] then
@@ -1517,7 +1849,7 @@ begin
   end;
   Trusted := 0;
   for k := 0 to High(P^.TrustedDevices) do
-    if P^.TrustedDevices[k].Expire >= NowT then
+    if (P^.TrustedDevices[k].Expire >= SecNow) and (P^.TrustedDevices[k].LastUsed >= P^.PassSetTime) then
       Inc(Trusted);
   if P^.Email = '' then
     Mail := 'no e-mail'
@@ -1596,7 +1928,7 @@ begin
       P^.PassHash := R.Hash;
       P^.PassSalt := Op.SaltHex;
       P^.PassIter := Op.Iterations;
-      P^.PassSetTime := NowT;
+      P^.PassSetTime := SecNow;
       P^.TrustedDevices := nil;
       P^.LoginFailCount := 0;
       P^.LoginLockUntil := 0;
@@ -1634,7 +1966,7 @@ begin
         P^.PassHash := R.Hash;
         P^.PassSalt := SaltHex;
         P^.PassIter := Iter;
-        P^.PassSetTime := NowT;
+        P^.PassSetTime := SecNow;
         P^.LoginFailCount := 0;
         P^.LoginLockUntil := 0;
         FDB.EndIdentityChange(Idx);
@@ -1669,7 +2001,7 @@ begin
         end;
         P^.PassHash := R.Hash2;
         P^.PassSalt := SaltHex;
-        P^.PassSetTime := NowT;
+        P^.PassSetTime := SecNow;
         { the rounds the new hash was made with (the settings' at the request) }
         P^.PassIter := Iter;
         DropTrustedDevices(Idx, S^.Hwid, S^.IP);
@@ -1705,7 +2037,7 @@ begin
         P^.PassHash := R.Hash;
         P^.PassSalt := SaltHex;
         P^.PassIter := Iter;
-        P^.PassSetTime := NowT;
+        P^.PassSetTime := SecNow;
         DropTrustedDevices(Idx, '', '');
         P^.ResetCodeHash := '';
         P^.ResetCodeExpire := 0;

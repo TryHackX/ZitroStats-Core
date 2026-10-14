@@ -304,7 +304,7 @@ begin
     the accounts' own: bullets only, where the weapon totals count explosions and blades too. }
   for j := 0 to WSLOT_COUNT - 1 do
     Totals[j] := Default(TWeaponTotals);
-  CollectWeaponTotals(E, Totals, E.Cfg.MySQLShareServer);
+  CollectWeaponTotals(E, Totals, E.Cfg.MySQLShareServer, SumsAge(Slot));
   WDmg := 0;
   WHits := 0;
   TopKillSlot := 0;
@@ -506,6 +506,9 @@ begin
 end;
 
 procedure CmdPerf(E: TZSEngine; Slot: LongInt);
+var
+  L: AnsiString;
+  k: LongInt;
 begin
   Out(E, Slot, Format('[ZitroStats %s] engine timing since %s', [ZS_VERSION_STR, FormatDateTime('yyyy-mm-dd hh:nn', E.PerfSince)]), CLR_HEADER);
   Out(E, Slot, Format('events: %d, avg %s ms, max %s ms, batch max %d, queued %d, dropped %d', [E.PerfEvents,
@@ -523,4 +526,14 @@ begin
     Out(E, Slot, 'storage: read-only, nothing is saved', CLR_WARN);
   if E.Service <> nil then
     Out(E, Slot, Format('service: %d password jobs waiting', [E.Service.PendingHashes]), CLR_HINT);
+  { [Bridges] (5.6) }
+  L := E.BridgeReport;
+  while L <> '' do
+  begin
+    k := Pos(#10, L);
+    if k = 0 then
+      k := Length(L) + 1;
+    Out(E, Slot, 'bridges: ' + Copy(L, 1, k - 1), CLR_HINT);
+    Delete(L, 1, k);
+  end;
 end;

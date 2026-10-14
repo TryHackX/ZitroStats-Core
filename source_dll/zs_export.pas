@@ -8,7 +8,8 @@ unit zs_export;
   players.json (FullExportPath)  every account with its detailed statistics.
 
   Neither file contains IP addresses, hardware IDs, SteamIDs or e-mail addresses.
-  The JSON text is built on the engine thread and written by the IO thread (atomic replace).
+  The JSON text is built on the engine thread and written by the IO thread (atomic replace);
+  players.json a part every timer run, so the engine never stops for the whole file.
   Webhooks are posted by the service thread; events: export, match, season, record.
 
   Everything here only reads statistics. }
@@ -35,6 +36,8 @@ uses
 
 const
   RECORD_SETTLE_MS = 5 * 60 * 1000;   { a new online peak is reported after it held for 5 minutes }
+  FULL_PART_BYTES = 1024 * 1024;      { players.json: a part holds about this much text at most }
+  FULL_PART_MICROS = 20000;           { and takes about this much of a timer run }
   MODE_NAMES: array[0..6] of AnsiString = ('DM', 'PM', 'TM', 'CTF', 'RM', 'INF', 'HTF');
   TEAM_NAMES: array[0..5] of AnsiString = ('none', 'alpha', 'bravo', 'charlie', 'delta', 'spectator');
 
@@ -51,6 +54,13 @@ var
   PeakPosted: LongInt;
   PeakSeen: LongInt;
   PeakChangedMs: Int64;
+  { players.json being built: the accounts (by id) when it started, the next of them (-1 = none
+    being built), the accounts written, the file and the mark of who waits for it }
+  FullIds: TIntArray;
+  FullNext: LongInt = -1;
+  FullCount: LongInt;
+  FullPath: AnsiString;
+  FullTag: LongInt;
 
 procedure Put(var W: TJson; const S: AnsiString);
 var
@@ -270,6 +280,9 @@ begin
     KF('avg_players', SafeDivD(M.HumansSampleSum, M.HumansSampleCount), 1) + ', ' + KF('fastest_cap_sec', M.FastestCapSeconds, 2) + ', ' +
     KI('votes_started', M.VoteStarts) + ', ' + KI('votes_won', M.VotesPassed) + ', ' + KI('voted_in', M.VotedIn) + ', ' +
     JsonStr('stayed_pct') + ': ' + Stayed + ', ' + JsonStr('players_by_time') + ': ' + PlayerCurveJson(M) + ', ' +
+    KF('longest_hit_m', M.LongestHit, 1) + ', ' + KF('avg_hit_dist_m', SafeDivD(M.HitDistSum, M.HitDistCount), 1) + ', ' +
+    KF('avg_hit_flight_sec', SafeDivD(M.HitAirTicks, M.HitAirCount) / TICKS_PER_SECOND, 2) + ', ' +
+    KF('avg_kill_flight_sec', SafeDivD(M.KillAirTicks, M.KillAirCount) / TICKS_PER_SECOND, 2) + ', ' +
     KT('last_played', M.LastPlayedTime) + '}');
 end;
 
@@ -301,6 +314,9 @@ begin
       KF('hits_per_kill', SafeDivD(T[S].Hits, T[S].Kills), 2) + ', ' +
       KF('longest_kill_m', T[S].Longest, 1) + ', ' +
       KF('avg_kill_dist_m', SafeDivD(G^.KillDistSum, G^.KillDistCount), 1) + ', ' +
+      KF('longest_hit_m', T[S].LongestHit, 1) + ', ' + KF('avg_hit_dist_m', SafeDivD(T[S].HitDistSum, T[S].HitDistCount), 1) +
+      ', ' + KF('avg_hit_flight_sec', SafeDivD(T[S].HitAirTicks, T[S].HitAirCount) / TICKS_PER_SECOND, 2) + ', ' +
+      KF('avg_kill_flight_sec', SafeDivD(T[S].KillAirTicks, T[S].KillAirCount) / TICKS_PER_SECOND, 2) + ', ' +
       KF('avg_ttk_sec', SafeDivD(G^.TTKSumTicks, G^.TTKCount) / TICKS_PER_SECOND, 2) + ', ' + KI('picks', G^.Picks) + ', ' +
       KI('picks_alpha', G^.PicksTeam[1]) + ', ' + KI('picks_bravo', G^.PicksTeam[2]) + ', ' +
       KI('picks_charlie', G^.PicksTeam[3]) + ', ' + KI('picks_delta', G^.PicksTeam[4]) + ', ' +
@@ -438,6 +454,28 @@ begin
     KF('best_life_distance_m', P^.BestLifeDistanceM, 0) + ', ' + KF('healed_hp', P^.HealRegen + P^.HealKits, 0) + ', ' +
     KF('regen_hp', P^.HealRegen, 0) + ', ' + KI('heal_kits', P^.HealKitCount) + ', ' +
     KI('kits', KitsPickedUp(P^)) + ', ');
+  { added in 5.6: read from the server directly ([Bridges]); the shots and hits by stance in the order
+    stand, crouch, prone, air }
+  Put(W, KI('collateral_kills', P^.CollateralKills) + ', ' + KI('back_kills', P^.BackKills) + ', ' +
+    KI('back_deaths', P^.BackDeaths) + ', ' + KF('longest_headshot_m', P^.LongestHeadshotM, 1) + ', ' +
+    KF('longest_bullet_flight_sec', P^.LongestFlightKill, 2) + ', ' + KF('longest_hit_m', P^.LongestHitM, 1) + ', ' +
+    KF('avg_hit_dist_m', SafeDivD(P^.HitDistSum, P^.HitDistCount), 1) + ', ' +
+    KF('avg_hit_flight_sec', SafeDivD(P^.HitAirTicks, P^.HitAirCount) / TICKS_PER_SECOND, 2) + ', ' +
+    KF('avg_kill_flight_sec', SafeDivD(P^.KillAirTicks, P^.KillAirCount) / TICKS_PER_SECOND, 2) + ', "stance_shots": [');
+  for k := 0 to 3 do
+  begin
+    if k > 0 then
+      Put(W, ', ');
+    Put(W, IntToStr(P^.StanceShots[k]));
+  end;
+  Put(W, '], "stance_hits": [');
+  for k := 0 to 3 do
+  begin
+    if k > 0 then
+      Put(W, ', ');
+    Put(W, IntToStr(P^.StanceHits[k]));
+  end;
+  Put(W, '], ');
   { the kits picked up, by kind }
   Put(W, '"kit_pickups": {');
   for k := 0 to KIT_KINDS - 1 do
@@ -475,7 +513,10 @@ begin
       KF('damage', WS^.Damage, 0) + ', ' + KI('time_sec', WS^.TimeUsedSeconds) + ', ' +
       KI('reloads', WS^.Reloads) + ', ' + KI('reloads_finished', WS^.ReloadsDone) + ', ' +
       KI('killed_reloading', WS^.ReloadDeaths) + ', ' +
-      KF('avg_reload_sec', SafeDivD(WS^.ReloadTicks, WS^.ReloadTimed) / TICKS_PER_SECOND, 2) + '}');
+      KF('avg_reload_sec', SafeDivD(WS^.ReloadTicks, WS^.ReloadTimed) / TICKS_PER_SECOND, 2) + ', ' +
+      KF('longest_hit_m', WS^.LongestHit, 1) + ', ' + KF('avg_hit_dist_m', SafeDivD(WS^.HitDistSum, WS^.HitDistCount), 1) +
+      ', ' + KF('avg_hit_flight_sec', SafeDivD(WS^.HitAirTicks, WS^.HitAirCount) / TICKS_PER_SECOND, 2) + ', ' +
+      KF('avg_kill_flight_sec', SafeDivD(WS^.KillAirTicks, WS^.KillAirCount) / TICKS_PER_SECOND, 2) + '}');
   end;
   Put(W, '}, "modes": {');
   n := 0;
@@ -493,27 +534,79 @@ begin
   Put(W, '}}');
 end;
 
-function PlayersJson(E: TZSEngine): AnsiString;
+{ players.json is built a part every timer run (StateLock is held only for that part) and handed to
+  the IO thread part by part, so the file never stands whole in memory either; the IO thread puts it
+  in place at once with the last part. total_players counts the accounts when it started: one
+  removed while it is built is left out, one added comes with the next export. }
+procedure FullStart(E: TZSEngine; Tag: LongInt);
 var
-  W: TJson;
   k, n: LongInt;
+  Job: TStoreJob;
 begin
-  W.Buf := '';
-  W.Len := 0;
-  Put(W, '{' + LineEnding + '  ' + KI('format', 2) + ',' + LineEnding + '  ' + KT('generated_at', Now) + ',' + LineEnding +
-    '  ' + KI('total_players', E.DB.LiveProfiles) + ',' + LineEnding + '  "players": [');
+  SetLength(FullIds, E.DB.ProfileCount);
   n := 0;
   for k := 0 to E.DB.ProfileCount - 1 do
     if E.DB.Valid(k) then
     begin
-      if n > 0 then
-        Put(W, ',');
+      FullIds[n] := E.DB.Profiles[k]^.ID;
       Inc(n);
-      Put(W, LineEnding + '    ');
-      PlayerFull(E, W, k);
     end;
-  Put(W, LineEnding + '  ]' + LineEnding + '}' + LineEnding);
-  Result := Text(W);
+  SetLength(FullIds, n);
+  FullNext := 0;
+  FullCount := 0;
+  FullPath := ResolvePath(E.Cfg.FullExportPath);
+  FullTag := Tag;
+  Job := NewJob(sjWritePart, 0, FullTag);
+  Job.Keep := PART_FIRST;
+  Job.Path := FullPath;
+  Job.Data := '{' + LineEnding + '  ' + KI('format', 2) + ',' + LineEnding + '  ' + KT('generated_at', Now) + ',' + LineEnding +
+    '  ' + KI('total_players', n) + ',' + LineEnding + '  "players": [';
+  E.IO.Enqueue(Job);
+end;
+
+procedure FullContinue(E: TZSEngine);
+var
+  W: TJson;
+  T0: Int64;
+  Idx: LongInt;
+  Job: TStoreJob;
+begin
+  { a disk that does not keep up: the next part waits }
+  if E.IO.PendingBytes >= SNAPSHOT_IO_HIGH_WATER then
+    Exit;
+  W.Buf := '';
+  W.Len := 0;
+  T0 := MicroNow;
+  while (FullNext < Length(FullIds)) and (W.Len < FULL_PART_BYTES) and ((W.Len = 0) or (MicroNow - T0 < FULL_PART_MICROS)) do
+  begin
+    Idx := E.DB.IndexOfId(FullIds[FullNext]);
+    Inc(FullNext);
+    if not E.DB.Valid(Idx) then
+      Continue;
+    if FullCount > 0 then
+      Put(W, ',');
+    Inc(FullCount);
+    Put(W, LineEnding + '    ');
+    PlayerFull(E, W, Idx);
+  end;
+  Job := NewJob(sjWritePart, 0, FullTag);
+  if FullNext >= Length(FullIds) then
+  begin
+    Put(W, LineEnding + '  ]' + LineEnding + '}' + LineEnding);
+    Job.Keep := PART_LAST;
+  end;
+  Job.Path := FullPath;
+  SetLength(W.Buf, W.Len);
+  Job.Data := W.Buf;
+  E.IO.Enqueue(Job);
+  if Job.Keep = PART_LAST then
+  begin
+    FullNext := -1;
+    FullIds := nil;
+    { the mark behind the files says the asker has heard everything }
+    if FullTag = TAG_EXPORT then
+      E.IO.Enqueue(NewJob(sjNotify, 0, TAG_EXPORT_DONE));
+  end;
 end;
 
 function PlayerJson(E: TZSEngine; Index: LongInt): AnsiString;
@@ -678,6 +771,9 @@ begin
     PeakPosted := E.DB.Server.PeakOnlineCount;
     PeakSeen := PeakPosted;
     PeakChangedMs := NowMs;
+    { a players.json the engine before was building stays unfinished (its .part file) }
+    FullNext := -1;
+    FullIds := nil;
   end;
   if not E.IsReady then
     Exit;
@@ -696,14 +792,22 @@ begin
     LastExportMs := NowMs;
     if E.Cfg.JSONExportEnabled then
       WriteText(E, E.Cfg.JSONExportPath, StatsJson(E), Tag);
-    if E.Cfg.FullExportEnabled then
-      WriteText(E, E.Cfg.FullExportPath, PlayersJson(E), Tag);
-    { the mark behind the files says the asker has heard everything }
-    if (Tag = TAG_EXPORT) and (E.IO <> nil) then
+    { players.json: a new one, unless one is still being built - that one carries the asker's mark;
+      the mark behind the files says the asker has heard everything }
+    if E.Cfg.FullExportEnabled and (E.IO <> nil) and (Trim(E.Cfg.FullExportPath) <> '') then
+    begin
+      if FullNext < 0 then
+        FullStart(E, Tag)
+      else if Tag <> 0 then
+        FullTag := Tag;
+    end
+    else if (Tag = TAG_EXPORT) and (E.IO <> nil) then
       E.IO.Enqueue(NewJob(sjNotify, 0, TAG_EXPORT_DONE));
     if WebhookWanted(E, 'export') then
       WebhookExport(E);
   end;
+  if (FullNext >= 0) and (E.IO <> nil) then
+    FullContinue(E);
 
   if E.DB.Server.PeakOnlineCount <> PeakSeen then
   begin

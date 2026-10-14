@@ -50,6 +50,16 @@ begin
     BVX := 0;
     BVY := 0;
   end;
+  { [Bridges]: the bullet itself says where and when it was fired (its Initial and StartUpTime), the
+    numbers of the server's own kill message - for every weapon and every shooter, bots too; no
+    flight for a flame }
+  if Ev.I[2] and EF_ORIGIN <> 0 then
+  begin
+    Dist := Hypot(HX - Ev.F[13], HY - Ev.F[14]);
+    if (W <> WEP_FLAMER) and (Tick >= Ev.I[4]) and (Tick - Ev.I[4] <= MAX_FLIGHT_TICKS) then
+      Flight := (Tick - Ev.I[4]) / TICKS_PER_SECOND;
+    Exit;
+  end;
   if LiveFindShot(E.Live[S], W, Tick, HX, HY, BVX, BVY, SX, SY) then
   begin
     Dist := Hypot(HX - SX, HY - SY);
@@ -127,7 +137,7 @@ begin
   Base := 0;
   if Ev.F[1] > 0 then
     Base := Base or LFF_VEST;
-  if (Zone >= HZ_HEAD) and (Zone <= HZ_LEGS) and not WeaponHasDistinctZones(W) then
+  if (Zone >= HZ_HEAD) and (Zone <= HZ_LEGS) and not WeaponHasDistinctZones(W) and (Ev.I[2] and EF_ZONE = 0) then
     Base := Base or LFF_ZONE_EST;
   if S = V then
     Base := Base or LFF_SELF

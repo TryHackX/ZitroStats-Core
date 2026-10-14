@@ -378,6 +378,19 @@ begin
     'Avg Kill Dist: ' + FloatStr(SafeDivD(P^.TotalKillDistance, P^.KillDistanceCount), 1) + 'm'], COLS3, WHITE);
   Row(E, Slot, ['100m+ Kills: ' + Num(P^.LongKills100), 'Barrett Long: ' + Num(P^.BarrettLongKills),
     'Unclear Zone: ' + Num(P^.ShotsHitsUnknown)], COLS3, WHITE);
+  { [Bridges] (5.6): what only the server's memory and its bullets tell - the hits and the kills measured
+    from where and when their bullet was made }
+  if (P^.LongestHeadshotM > 0) or (P^.LongestFlightKill > 0) or (P^.HitDistCount > 0) or (P^.KillAirCount > 0) then
+  begin
+    Row(E, Slot, ['Longest Hit: ' + MetersText(P^.LongestHitM), 'Avg Hit Dist: ' + AvgMetersText(P^.HitDistSum,
+      P^.HitDistCount), 'Avg Hit Air: ' + AvgAirText(P^.HitAirTicks, P^.HitAirCount)], COLS3, WHITE);
+    Row(E, Slot, ['Longest Headshot: ' + FloatStr(P^.LongestHeadshotM, 1) + 'm',
+      'Longest Air Time: ' + FloatStr(P^.LongestFlightKill, 2) + 's',
+      'Avg Kill Air: ' + AvgAirText(P^.KillAirTicks, P^.KillAirCount)], COLS3, WHITE);
+  end;
+  Name := StanceAccText(P^.StanceShots, P^.StanceHits);
+  if Name <> '' then
+    Out(E, Slot, Name, WHITE);
 
   Section(E, Slot, 'Timing, Movement & Positioning', LINE_W);
   Row(E, Slot, ['Avg TTK: ' + FloatStr(SafeDivD(P^.TTKSumTicks, P^.TTKCount) / TICKS_PER_SECOND, 2) + 's',
@@ -418,7 +431,10 @@ begin
     'Nade Kills: ' + Num(P^.GrenadeKills), Name, 'Explosive Multi: ' + Num(P^.ExplosionMultiKills),
     'Knife Streak: ' + IntToStr(P^.KnifeKillsLifeBest), 'Cover (live): ' + Num(P^.WallKills),
     'Cover (shot): ' + Num(P^.CoverShotKills), 'Forced Selfkills: ' + Num(P^.ForcedSelfkills),
-    Format('Selfkills: %s (%s)', [Num(P^.Selfkills), Pct(P^.Selfkills, SelfkillBase(E, P^))])], COLS3, WHITE);
+    Format('Selfkills: %s (%s)', [Num(P^.Selfkills), Pct(P^.Selfkills, SelfkillBase(E, P^))]),
+    IfText(P^.CollateralKills > 0, 'Collaterals: ' + Num(P^.CollateralKills)),
+    IfText(P^.BackKills + P^.BackDeaths > 0, 'Back Kills: ' + Num(P^.BackKills)),
+    IfText(P^.BackKills + P^.BackDeaths > 0, 'Back Deaths: ' + Num(P^.BackDeaths))], COLS3, WHITE);
 
   if (P^.FlagsScore + P^.FlagsReturn + P^.FlagsGrab + P^.FlagsDrop + P^.FlaggerKills + P^.TimeHoldingFlags > 0) or ObjectiveMode(E) then
   begin
@@ -660,6 +676,19 @@ begin
 end;
 
 { admin account audit: identity data is shown to admins only }
+{ the computers of an account that are still trusted: not expired and added after the password was set }
+function TrustedNow(E: TZSEngine; const P: TPlayerProfile): LongInt;
+var
+  k: LongInt;
+  T: Double;
+begin
+  Result := 0;
+  T := LocalToUtc(E.DB.NowValue);
+  for k := 0 to High(P.TrustedDevices) do
+    if (P.TrustedDevices[k].Expire >= T) and (P.TrustedDevices[k].LastUsed >= P.PassSetTime) then
+      Inc(Result);
+end;
+
 procedure CmdAudit(E: TZSEngine; Slot, Idx: LongInt);
 var
   P: PPlayerProfile;
@@ -713,9 +742,9 @@ begin
       Mail := MaskEmail(P^.Email) + BoolToStr(P^.EmailVerified, ' (verified)', ' (not verified)')
     else
       Mail := 'no e-mail';
-    Row(E, Slot, ['Password: set ' + DateText(P^.PassSetTime, 'dd.mm.yyyy'), 'E-mail: ' + Mail], COLS2, CLR_HINT);
-    Row(E, Slot, [Format('Trusted devices: %d', [Length(P^.TrustedDevices)]), Format('Failed logins: %d', [P^.LoginFailCount]),
-      BoolToStr(P^.LoginLockUntil > Now, 'LOCKED', 'not locked')], COLS3, CLR_HINT);
+    Row(E, Slot, ['Password: set ' + DateText(UtcToLocal(P^.PassSetTime), 'dd.mm.yyyy'), 'E-mail: ' + Mail], COLS2, CLR_HINT);
+    Row(E, Slot, [Format('Trusted devices: %d', [TrustedNow(E, P^)]), Format('Failed logins: %d', [P^.LoginFailCount]),
+      BoolToStr(P^.LoginLockUntil > LocalToUtc(E.DB.NowValue), 'LOCKED', 'not locked')], COLS3, CLR_HINT);
   end
   else
     Out(E, Slot, 'Password: none (unregistered account)', CLR_HINT);

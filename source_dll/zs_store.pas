@@ -45,6 +45,13 @@ const
   JOURNAL_MAGIC = $4C4A535A;  { 'ZSJL' }
   STORE_HEADER_SIZE = 28;
   SNAPSHOT_CHUNK = 1024 * 1024;
+  { a big batch of journal records (a new season touches every account) goes to the IO thread in
+    portions of this size, in the same generation and order: neither the buffer nor its copy for
+    the IO thread ever holds the whole batch }
+  JOURNAL_PORTION = 4 * 1024 * 1024;
+  { sjWritePart: the first and the last part of a file (a file of one part is both) }
+  PART_FIRST = 1;
+  PART_LAST = 2;
   MAX_STORE_ID = 20000000;
 
 type
@@ -63,6 +70,9 @@ type
   TStoreLoadInfo = record
     Source: AnsiString;
     SnapshotGen: LongWord;
+    { the date in the header of the snapshot that was read (0 = none): the engine counts the time to
+      the next routine snapshot from it, so restarts do not start that time again }
+    SnapshotCreated: Double;
     MaxGen: LongWord;
     SnapshotRecords: LongInt;
     JournalFiles: LongInt;
@@ -78,9 +88,12 @@ type
 
   TStoreLoadResult = (slEmpty, slLoaded, slFailed);
 
-  { sjNotify does nothing and reports that it was reached: every job before it is done then }
+  { sjNotify does nothing and reports that it was reached: every job before it is done then.
+    sjWritePart writes a file in parts, in order (Keep: PART_FIRST and/or PART_LAST): the parts go to
+    <Path>.part and the last one puts it in place of the file at once, as sjWriteFile does; it
+    reports like sjWriteFile (a failed part drops the rest, the file stays as it was). }
   TStoreJobKind = (sjAppend, sjSnapshotBegin, sjSnapshotData, sjSnapshotCommit, sjSnapshotAbort,
-    sjWriteFile, sjAppendText, sjPruneBackups, sjNotify, sjStop);
+    sjWriteFile, sjWritePart, sjAppendText, sjPruneBackups, sjNotify, sjStop);
 
   TStoreJob = record
     Kind: TStoreJobKind;
@@ -119,6 +132,8 @@ type
     FSnap: TFileStream;
     FSnapGen: LongWord;
     FSnapFailed: Boolean;
+    FPartPath: AnsiString;   { the file sjWritePart is writing, '' = none }
+    FPartBytes: Int64;
     procedure Post(Kind: TStoreJobKind; Tag: LongInt; Ok: Boolean; const Msg: AnsiString; Bytes: Int64 = 0);
     procedure CloseJournal;
     function OpenJournal(Gen: LongWord): Boolean;
@@ -130,6 +145,7 @@ type
     procedure DoSnapshotData(const Job: TStoreJob);
     procedure DoSnapshotCommit(const Job: TStoreJob);
     procedure DoPrune(const Job: TStoreJob);
+    procedure DoWritePart(const Job: TStoreJob);
   protected
     procedure Execute; override;
   public
@@ -156,8 +172,12 @@ type
     FSnapRecords: LongInt;
     FJournalBytes: Int64;
     procedure PushSnapshotChunk;
+    procedure JournalFrame(RecType: Byte; const Payload: AnsiString);
+    procedure PushJournal;
   public
-    constructor Create(IO: TStoreIO; LastGen: LongWord);
+    { JournalBytes: the journal bytes on disk since the snapshot that was read (earlier runs); they
+      count towards CompactJournalMB as if this run had written them }
+    constructor Create(IO: TStoreIO; LastGen: LongWord; JournalBytes: Int64 = 0);
     procedure JournalProfile(const P: TPlayerProfile);
     procedure JournalMap(const M: TMapProfile);
     procedure JournalServer(const S: TServerRecords);
@@ -255,6 +275,7 @@ procedure ResetInfo(out Info: TStoreLoadInfo);
 begin
   Info.Source := '';
   Info.SnapshotGen := 0;
+  Info.SnapshotCreated := 0;
   Info.MaxGen := 0;
   Info.SnapshotRecords := 0;
   Info.JournalFiles := 0;
@@ -295,6 +316,19 @@ begin
     Exit;
   Gen := H.Gen;
   Result := True;
+end;
+
+{ the date a file with a sound header was started (Now when it was made), 0 otherwise }
+function HeaderCreated(const Data: AnsiString; Magic: LongWord): Double;
+var
+  H: TStoreHeader;
+  Gen: LongWord;
+begin
+  Result := 0;
+  if not ParseHeader(Data, Magic, Gen) then
+    Exit;
+  Move(Data[1], H, SizeOf(H));
+  Result := H.Created;
 end;
 
 function ReadHeaderGen(const Path: AnsiString; Magic: LongWord; out Gen: LongWord): Boolean;
@@ -891,6 +925,7 @@ begin
     begin
       Info.Source := Cand[i];
       Info.SnapshotGen := G;
+      Info.SnapshotCreated := HeaderCreated(Data, SNAPSHOT_MAGIC);
       Loaded := True;
       Break;
     end;
@@ -959,6 +994,7 @@ begin
   begin
     Info.Source := Path;
     Info.SnapshotGen := G;
+    Info.SnapshotCreated := HeaderCreated(Data, SNAPSHOT_MAGIC);
     Info.MaxGen := G;
     CompactState(St);
   end
@@ -1123,6 +1159,7 @@ begin
             else if Batch[i].Tag <> 0 then
               { somebody waits for this file (/zs_export) }
               Post(sjWriteFile, Batch[i].Tag, True, Batch[i].Path, Length(Batch[i].Data));
+          sjWritePart: DoWritePart(Batch[i]);
           sjNotify:
             Post(sjNotify, Batch[i].Tag, True, '');
           sjAppendText:
@@ -1424,33 +1461,87 @@ begin
   end;
 end;
 
+procedure TStoreIO.DoWritePart(const Job: TStoreJob);
+var
+  Tmp: AnsiString;
+  F: TFileStream;
+begin
+  Tmp := Job.Path + '.part';
+  if Job.Keep and PART_FIRST <> 0 then
+  begin
+    FPartPath := Job.Path;
+    FPartBytes := 0;
+  end
+  else if FPartPath <> Job.Path then
+    Exit; { an earlier part failed (and said so), or the first one never came }
+  try
+    EnsureDir(ExtractFileDir(Job.Path));
+    if Job.Keep and PART_FIRST <> 0 then
+      F := TFileStream.Create(Tmp, fmCreate)
+    else
+    begin
+      F := TFileStream.Create(Tmp, fmOpenWrite or fmShareDenyWrite);
+      F.Seek(0, soEnd);
+    end;
+    try
+      if Job.Data <> '' then
+        F.WriteBuffer(Job.Data[1], Length(Job.Data));
+    finally
+      F.Free;
+    end;
+    Inc(FPartBytes, Length(Job.Data));
+    if Job.Keep and PART_LAST <> 0 then
+    begin
+      FPartPath := '';
+      if not ReplaceFile(Tmp, Job.Path) then
+        raise EInOutError.Create('cannot replace the file');
+      if Job.Tag <> 0 then
+        { somebody waits for this file (/zs_export) }
+        Post(sjWriteFile, Job.Tag, True, Job.Path, FPartBytes);
+    end;
+  except
+    FPartPath := '';
+    SysUtils.DeleteFile(Tmp);
+    Post(sjWriteFile, Job.Tag, False, 'cannot write ' + Job.Path);
+  end;
+end;
+
 { ---------------- writer ---------------- }
 
-constructor TStoreWriter.Create(IO: TStoreIO; LastGen: LongWord);
+constructor TStoreWriter.Create(IO: TStoreIO; LastGen: LongWord; JournalBytes: Int64);
 begin
   inherited Create;
   FIO := IO;
   FGen := LastGen + 1;
+  if JournalBytes > 0 then
+    FJournalBytes := JournalBytes;
+end;
+
+procedure TStoreWriter.JournalFrame(RecType: Byte; const Payload: AnsiString);
+begin
+  AppendFrame(FJBuf, FJLen, RecType, Payload);
+  if FJLen >= JOURNAL_PORTION then
+    PushJournal;
 end;
 
 procedure TStoreWriter.JournalProfile(const P: TPlayerProfile);
 begin
-  AppendFrame(FJBuf, FJLen, REC_PROFILE, EncodeProfile(P));
+  JournalFrame(REC_PROFILE, EncodeProfile(P));
 end;
 
 procedure TStoreWriter.JournalMap(const M: TMapProfile);
 begin
-  AppendFrame(FJBuf, FJLen, REC_MAP, EncodeMap(M));
+  JournalFrame(REC_MAP, EncodeMap(M));
 end;
 
 procedure TStoreWriter.JournalServer(const S: TServerRecords);
 begin
-  AppendFrame(FJBuf, FJLen, REC_SERVER, EncodeServer(S));
+  JournalFrame(REC_SERVER, EncodeServer(S));
 end;
 
 procedure TStoreWriter.JournalSeason(const A: TSeasonArchive);
 begin
-  AppendFrame(FJBuf, FJLen, REC_SEASON, EncodeSeason(A));
+  JournalFrame(REC_SEASON, EncodeSeason(A));
 end;
 
 procedure TStoreWriter.JournalDeleteProfile(Id: LongInt);
@@ -1459,7 +1550,7 @@ var
 begin
   SetLength(S, 4);
   Move(Id, S[1], 4);
-  AppendFrame(FJBuf, FJLen, REC_DEL_PROFILE, S);
+  JournalFrame(REC_DEL_PROFILE, S);
 end;
 
 procedure TStoreWriter.JournalDeleteMap(Id: LongInt);
@@ -1468,12 +1559,12 @@ var
 begin
   SetLength(S, 4);
   Move(Id, S[1], 4);
-  AppendFrame(FJBuf, FJLen, REC_DEL_MAP, S);
+  JournalFrame(REC_DEL_MAP, S);
 end;
 
 procedure TStoreWriter.JournalPlayerMap(const R: TPlayerMapStats);
 begin
-  AppendFrame(FJBuf, FJLen, REC_PLAYERMAP, EncodePlayerMap(R));
+  JournalFrame(REC_PLAYERMAP, EncodePlayerMap(R));
 end;
 
 procedure TStoreWriter.JournalDeletePlayerMap(AccountId: LongInt; const MapName: AnsiString);
@@ -1484,10 +1575,10 @@ begin
   Move(AccountId, S[1], 4);
   if MapName <> '' then
     Move(MapName[1], S[5], Length(MapName));
-  AppendFrame(FJBuf, FJLen, REC_DEL_PLAYERMAP, S);
+  JournalFrame(REC_DEL_PLAYERMAP, S);
 end;
 
-procedure TStoreWriter.Flush;
+procedure TStoreWriter.PushJournal;
 var
   Job: TStoreJob;
 begin
@@ -1495,11 +1586,20 @@ begin
     Exit;
   Job := NewJob(sjAppend, FGen);
   Job.Data := Copy(FJBuf, 1, FJLen);
+  { the records leave the buffer only once the IO thread has them: a hand-over that fails (no
+    memory) keeps them for the next try }
+  FIO.Enqueue(Job);
   Inc(FJournalBytes, FJLen);
   FJLen := 0;
+end;
+
+procedure TStoreWriter.Flush;
+begin
+  if FJLen = 0 then
+    Exit;
+  PushJournal;
   if Length(FJBuf) > 4 * 1024 * 1024 then
     SetLength(FJBuf, 65536);
-  FIO.Enqueue(Job);
 end;
 
 procedure TStoreWriter.BeginSnapshot(ProfileCount, MapCount, SeasonCount: LongInt);

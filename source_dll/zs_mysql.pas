@@ -1062,13 +1062,15 @@ begin
     B.Players[n].LastSeen := P^.LastPlayedTime;
     if E.Cfg.MySQLFullJson then
       B.Players[n].Json := PlayerJson(E, k);
-    { the whole record of an account (by SteamID, or by computer without Steam), for the other
-      servers of this database (SharedProfiles, SharedRankings): MirrorRecordDue }
+    { the record of an account (by SteamID, or by computer without Steam), for the other servers
+      of this database (SharedProfiles, SharedRankings): MirrorRecordDue. Websites read this table,
+      so the record goes without its login data (password, e-mail, HWID, IP, trusted computers):
+      the other servers add up only its statistics. }
     if SharePlayers then
     begin
       B.Players[n].SteamId := SharedIdentityOf(E.DB, k);
       if (B.Players[n].SteamId <> '') and MirrorRecordDue(Full, Online[k], P^.LastPlayedTime, Since) then
-        B.Players[n].Shared := EncodeStringBase64(EncodeProfile(P^));
+        B.Players[n].Shared := EncodeStringBase64(EncodeSharedProfile(P^));
     end;
     Inc(n);
   end;

@@ -325,7 +325,7 @@ end;
 
 { EvDamage, a hit on an enemy: the shooter's hits and damage, the victim's damage taken, the rivals
   of both }
-procedure MxDamage(E: TZSEngine; SIdx, VIdx, W: LongInt; Dmg: Single; Zone: LongInt);
+procedure MxDamage(E: TZSEngine; SIdx, VIdx, W: LongInt; Dmg: Single; Zone: LongInt; Shot: Boolean = True);
 var
   SR, VR: PPlayerMapStats;
   Wp: PPMWeapon;
@@ -339,9 +339,10 @@ begin
   NowT := E.DB.NowValue;
   WS := WepSlot(W);
   SR^.DamageDealt := SR^.DamageDealt + Dmg;
-  if CountsForAccuracy(W) then
+  { Shot = False: a script's bullet, no hit of the player's accuracy (EvDamage) }
+  if CountsForAccuracy(W) and Shot then
     Inc(SR^.Hits);
-  if ZoneClassifiableStyle(W) then
+  if ZoneClassifiableStyle(W) and Shot then
     case Zone of
       HZ_HEAD: Inc(SR^.HitsHead);
       HZ_BODY: Inc(SR^.HitsBody);
@@ -350,9 +351,12 @@ begin
   if WS >= 0 then
   begin
     Wp := PMWeaponOf(SR^, WS);
-    Inc(Wp^.Hits);
-    if ZoneClassifiableStyle(W) and (Zone = HZ_HEAD) then
-      Inc(Wp^.Headshots);
+    if Shot then
+    begin
+      Inc(Wp^.Hits);
+      if ZoneClassifiableStyle(W) and (Zone = HZ_HEAD) then
+        Inc(Wp^.Headshots);
+    end;
     Wp^.Damage := Wp^.Damage + Dmg;
   end;
   if VIdx = SIdx then
@@ -367,6 +371,50 @@ begin
   Rv := PMRivalOf(VR^, SR^.AccountId, E.DB.PM.MaxRivals);
   Rv^.DamageTaken := Rv^.DamageTaken + Dmg;
   Rv^.LastFight := NowT;
+end;
+
+{ CountHitFlight, a hit on an enemy measured from where its bullet was made (HitM metres; Air ticks in
+  the air, -1 for none - a flame or a grenade): the longest hit of the record and the weapon's entry
+  (the record's sums follow the account's) }
+procedure MxHitFlight(E: TZSEngine; Idx, WS: LongInt; HitM: Double; Air: LongInt);
+var
+  R: PPlayerMapStats;
+  Wp: PPMWeapon;
+begin
+  R := MxRec(E, Idx);
+  if R = nil then
+    Exit;
+  if HitM > R^.LongestHit then
+    R^.LongestHit := HitM;
+  if WS < 0 then
+    Exit;
+  Wp := PMWeaponOf(R^, WS);
+  Wp^.HitDistSum := Wp^.HitDistSum + HitM;
+  Inc(Wp^.HitDistCount);
+  if HitM > Wp^.LongestHit then
+    Wp^.LongestHit := HitM;
+  if Air >= 0 then
+  begin
+    Inc(Wp^.HitAirTicks, Air);
+    Inc(Wp^.HitAirCount);
+  end;
+end;
+
+{ KillEnemy, a lethal bullet whose flight is known (Air ticks): the weapon's entry of the killer's
+  record }
+procedure MxKillAir(E: TZSEngine; Idx, WS, Air: LongInt);
+var
+  R: PPlayerMapStats;
+  Wp: PPMWeapon;
+begin
+  if WS < 0 then
+    Exit;
+  R := MxRec(E, Idx);
+  if R = nil then
+    Exit;
+  Wp := PMWeaponOf(R^, WS);
+  Inc(Wp^.KillAirTicks, Air);
+  Inc(Wp^.KillAirCount);
 end;
 
 { CountShots: N shots with Weapon, as the account's own shots count them; the knife throws count

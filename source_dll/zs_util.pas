@@ -98,6 +98,9 @@ function DayKey(const T: TDateTime): LongInt;
 function WeekKey(const T: TDateTime): LongInt;
 function MonthKey(const T: TDateTime): LongInt;
 function UnixNow: Int64;
+{ a local time as UTC and back, with the offset of now; UtcToLocal leaves 0 (never) as it is }
+function LocalToUtc(const T: TDateTime): TDateTime;
+function UtcToLocal(const T: TDateTime): TDateTime;
 
 { Math }
 function SafeDivD(A, B: Double): Double;
@@ -837,6 +840,19 @@ begin
   Result := Round((Now + GetLocalTimeOffset / 1440 - EncodeDate(1970, 1, 1)) * 86400.0);
 end;
 
+function LocalToUtc(const T: TDateTime): TDateTime;
+begin
+  Result := T + GetLocalTimeOffset / 1440;
+end;
+
+function UtcToLocal(const T: TDateTime): TDateTime;
+begin
+  if T <= 0 then
+    Result := T
+  else
+    Result := T - GetLocalTimeOffset / 1440;
+end;
+
 { ---------------- Math ---------------- }
 
 function SafeDivD(A, B: Double): Double;
@@ -972,11 +988,18 @@ begin
   LKey := LowerAscii(Key);
   H := Fnv1aLower(LKey);
   b := H and LongWord(High(FBuckets));
+  { counted first, so the result is allocated once, also for thousands of accounts of one name }
+  n := 0;
+  for j := 0 to High(FBuckets[b]) do
+    if (FBuckets[b][j].Hash = H) and (FBuckets[b][j].Key = LKey) then
+      Inc(n);
+  if n = 0 then
+    Exit;
+  SetLength(Result, n);
   n := 0;
   for j := 0 to High(FBuckets[b]) do
     if (FBuckets[b][j].Hash = H) and (FBuckets[b][j].Key = LKey) then
     begin
-      SetLength(Result, n + 1);
       Result[n] := FBuckets[b][j].Value;
       Inc(n);
     end;

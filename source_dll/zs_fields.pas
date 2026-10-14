@@ -36,6 +36,8 @@ type
 const
   { the most counters of a player-on-map record that follow a counter of the account (PMFollows) }
   PM_FOLLOW_MAX = 96;
+  { the most trusted computers an account keeps (zs_identity); a three-way merge keeps no more }
+  MAX_TRUSTED_DEVICES = 8;
 
 type
   { A counter of the player-on-map record that counts what a counter of the account counts: the
@@ -65,6 +67,13 @@ var
 
 function EncodeProfile(const P: TPlayerProfile): AnsiString;
 function DecodeProfile(const Data: AnsiString; var P: TPlayerProfile): Boolean;
+{ The record of an account for a copy other servers and websites read (Engine = mirror,
+  zs_players.shared_data): without the fields that identify the person or open the account - the
+  SteamID, HWID and IP (ids 3-5), the password, e-mail, codes, mail and login counters and the
+  trusted computers (20-38). DecodeProfile reads it; those fields stay empty. }
+function EncodeSharedProfile(const P: TPlayerProfile): AnsiString;
+{ True for the fields EncodeSharedProfile leaves out }
+function IsLoginField(Id: Word): Boolean;
 function EncodeMap(const M: TMapProfile): AnsiString;
 function DecodeMap(const Data: AnsiString; var M: TMapProfile): Boolean;
 function EncodeServer(const S: TServerRecords): AnsiString;
@@ -99,8 +108,10 @@ procedure MergeServerInto(var Dst: TServerRecords; const Src: TServerRecords);
   or a best time keeps the better value (one that got worse here is a reset, and it stays), and
   a setting, a name or a rating takes this server's value when it changed here, otherwise the
   database's. Nothing another server wrote in the meantime is lost, whatever the order. Base
-  empty (all zero) means "everything is new". }
-procedure Merge3Profile(var Cur: TPlayerProfile; const Base, Remote: TPlayerProfile);
+  empty (all zero) means "everything is new". The trusted computers and the names are sets: what
+  one side removed stays removed. NameLimit > 0 ([Identity] NameHistoryLimit) cuts the names to
+  that many, the least recently used go first. }
+procedure Merge3Profile(var Cur: TPlayerProfile; const Base, Remote: TPlayerProfile; NameLimit: LongInt = 0);
 procedure Merge3Map(var Cur: TMapProfile; const Base, Remote: TMapProfile);
 procedure Merge3Server(var Cur: TServerRecords; const Base, Remote: TServerRecords);
 { the streaks of P that reached Kills kills (1-50, 50 = 50 or more), read from SpreeLives together
@@ -609,6 +620,25 @@ begin
   PF64(429, @DP.HealRegen);
   PF64(430, @DP.HealKits);
   P32(431, @DP.HealKitCount);
+  { [Bridges] (5.6): 432-444 }
+  P32(432, @DP.CollateralKills);
+  P32(433, @DP.BackKills);
+  P32(434, @DP.BackDeaths);
+  PF32(435, @DP.LongestHeadshotM, mkMax);
+  PF32(436, @DP.LongestFlightKill, mkMax);
+  for i := 0 to 3 do
+  begin
+    P32(437 + i, @DP.StanceShots[i]);
+    P32(441 + i, @DP.StanceHits[i]);
+  end;
+  { the hits' distance and air time, the kills' air time (445-451) }
+  PF64(445, @DP.HitDistSum);
+  P64(446, @DP.HitDistCount);
+  PF32(447, @DP.LongestHitM, mkMax);
+  P64(448, @DP.HitAirTicks);
+  P64(449, @DP.HitAirCount);
+  P64(450, @DP.KillAirTicks);
+  P64(451, @DP.KillAirCount);
 
   { nemesis lists are merged by a dedicated routine }
   for i := 0 to 2 do
@@ -905,6 +935,19 @@ begin
     P32(k + 8, @DP.Weapons[i].TTKCount);
     P32(k + 9, @DP.Weapons[i].VestKills);
   end;
+  { [Bridges] (5.6): the hits' distance and air time and the kills' air time of each weapon:
+    4000 + slot * 16 + k }
+  for i := 0 to WSLOT_COUNT - 1 do
+  begin
+    k := 4000 + i * 16;
+    PF64(k + 0, @DP.Weapons[i].HitDistSum);
+    P32(k + 1, @DP.Weapons[i].HitDistCount);
+    PF32(k + 2, @DP.Weapons[i].LongestHit, mkMax);
+    P64(k + 3, @DP.Weapons[i].HitAirTicks);
+    P32(k + 4, @DP.Weapons[i].HitAirCount);
+    P64(k + 5, @DP.Weapons[i].KillAirTicks);
+    P32(k + 6, @DP.Weapons[i].KillAirCount);
+  end;
 
   { maps (260..299): the date is no statistic, a reset keeps it }
   AddDef(MapFields, @DM, 260, fkDouble, @DM.LastLoadedTime, mkMax, False);
@@ -917,6 +960,14 @@ begin
   for i := 1 to 4 do
     M32(268 + i, @DM.KillsByTeam[i]);
   AddDef(MapFields, @DM, 273, fkMatchups, @DM.Matchups, mkKeep, True);
+  { [Bridges] (5.6): the hits and kills of the map measured from where their bullet was made }
+  MF64(274, @DM.HitDistSum);
+  M64(275, @DM.HitDistCount);
+  AddDef(MapFields, @DM, 276, fkSingle, @DM.LongestHit, mkMax, True);
+  M64(277, @DM.HitAirTicks);
+  M64(278, @DM.HitAirCount);
+  M64(279, @DM.KillAirTicks);
+  M64(280, @DM.KillAirCount);
 
   { the player-on-map record: the key, the dates, the counters, the lists }
   PM32(1, @DPM.AccountId, mkKeep, False);
@@ -1062,6 +1113,23 @@ begin
   PMFollow(174, @DPM.BowKills, @DP.RamboMode.KillsByBow, fkInt32);
   PMFollow(175, @DPM.BowTime, @DP.RamboMode.TimeWithBow, fkInt64);
   PMFollow(176, @DPM.RamboKills, @DP.RamboMode.KillRamboCount, fkInt32);
+  { [Bridges] (5.6): 200-210 }
+  PMFollow(200, @DPM.CollateralKills, @DP.CollateralKills, fkInt32);
+  PMFollow(201, @DPM.BackKills, @DP.BackKills, fkInt32);
+  PMFollow(202, @DPM.BackDeaths, @DP.BackDeaths, fkInt32);
+  for i := 0 to 3 do
+  begin
+    PMFollow(203 + i, @DPM.StanceShots[i], @DP.StanceShots[i], fkInt32);
+    PMFollow(207 + i, @DPM.StanceHits[i], @DP.StanceHits[i], fkInt32);
+  end;
+  { the hits' distance and air time, the kills' air time (211-216) }
+  PMFollow(211, @DPM.HitDistSum, @DP.HitDistSum, fkDouble);
+  PMFollow(212, @DPM.HitDistCount, @DP.HitDistCount, fkInt64);
+  PMFollow(213, @DPM.HitAirTicks, @DP.HitAirTicks, fkInt64);
+  PMFollow(214, @DPM.HitAirCount, @DP.HitAirCount, fkInt64);
+  PMFollow(215, @DPM.KillAirTicks, @DP.KillAirTicks, fkInt64);
+  PMFollow(216, @DPM.KillAirCount, @DP.KillAirCount, fkInt64);
+  PMF32(217, @DPM.LongestHit, mkMax);
 
   { the entries of the lists: the key is kept, the counters add up, a date takes the later one }
   AddDef(PMWeaponFields, @DPW, 1, fkInt32, @DPW.Slot, mkKeep, False);
@@ -1072,6 +1140,14 @@ begin
   AddDef(PMWeaponFields, @DPW, 6, fkInt32, @DPW.Headshots, mkSum, True);
   AddDef(PMWeaponFields, @DPW, 7, fkDouble, @DPW.Damage, mkSum, True);
   AddDef(PMWeaponFields, @DPW, 8, fkInt32, @DPW.TimeUsed, mkSum, True);
+  { [Bridges] (5.6): the weapon's hits and kills measured from where their bullet was made }
+  AddDef(PMWeaponFields, @DPW, 9, fkDouble, @DPW.HitDistSum, mkSum, True);
+  AddDef(PMWeaponFields, @DPW, 10, fkInt32, @DPW.HitDistCount, mkSum, True);
+  AddDef(PMWeaponFields, @DPW, 11, fkSingle, @DPW.LongestHit, mkMax, True);
+  AddDef(PMWeaponFields, @DPW, 12, fkInt32, @DPW.HitAirTicks, mkSum, True);
+  AddDef(PMWeaponFields, @DPW, 13, fkInt32, @DPW.HitAirCount, mkSum, True);
+  AddDef(PMWeaponFields, @DPW, 14, fkInt32, @DPW.KillAirTicks, mkSum, True);
+  AddDef(PMWeaponFields, @DPW, 15, fkInt32, @DPW.KillAirCount, mkSum, True);
   AddDef(PMRivalFields, @DPR, 1, fkInt32, @DPR.Id, mkKeep, False);
   AddDef(PMRivalFields, @DPR, 2, fkInt32, @DPR.Kills, mkSum, True);
   AddDef(PMRivalFields, @DPR, 3, fkInt32, @DPR.Deaths, mkSum, True);
@@ -1286,6 +1362,7 @@ type
 
 var
   ProfileLookup, MapLookup, ServerLookup: TDefLookup;
+  SharedProfileFields: TFieldDefArray;   { ProfileFields without the login fields }
   PlayerMapLookup, PMWeaponLookup, PMRivalLookup, PMMatchupLookup, MatchupCellLookup: TDefLookup;
 
 procedure BuildLookup(const Defs: TFieldDefArray; out Lookup: TDefLookup);
@@ -1835,6 +1912,35 @@ function DecodeProfile(const Data: AnsiString; var P: TPlayerProfile): Boolean;
 begin
   ClearProfile(P);
   Result := DecodeFields(Data, @P, ProfileFields, ProfileLookup);
+end;
+
+function IsLoginField(Id: Word): Boolean;
+begin
+  Result := ((Id >= 3) and (Id <= 5)) or ((Id >= 20) and (Id <= 38));
+end;
+
+procedure BuildSharedProfileFields;
+var
+  i, n: LongInt;
+begin
+  SetLength(SharedProfileFields, Length(ProfileFields));
+  n := 0;
+  for i := 0 to High(ProfileFields) do
+    if not IsLoginField(ProfileFields[i].Id) then
+    begin
+      SharedProfileFields[n] := ProfileFields[i];
+      Inc(n);
+    end;
+  SetLength(SharedProfileFields, n);
+end;
+
+function EncodeSharedProfile(const P: TPlayerProfile): AnsiString;
+var
+  W: TWriter;
+begin
+  WInit(W, 1024);
+  EncodeFields(W, @P, SharedProfileFields);
+  Result := WDone(W);
 end;
 
 function EncodeMap(const M: TMapProfile): AnsiString;
@@ -2561,13 +2667,26 @@ begin
 end;
 
 { the names of an account: what this server added to a name since Base goes on top of the name in
-  Remote; a name only this server knows is added, one the database dropped stays dropped }
-function Merge3Aliases(const Cur, Base, Remote: TOtherDataArray): TOtherDataArray;
+  Remote; a name only this server knows is added, one the database dropped stays dropped, and one
+  this server dropped (NameHistoryLimit) is dropped there too - unless another server used it
+  since. NameLimit > 0 cuts the list to that many, the least recently used go first. }
+function Merge3Aliases(const Cur, Base, Remote: TOtherDataArray; NameLimit: LongInt): TOtherDataArray;
 var
   i, b, r, n: LongInt;
   Key: AnsiString;
 begin
-  Result := Copy(Remote);
+  SetLength(Result, Length(Remote));
+  n := 0;
+  for i := 0 to High(Remote) do
+  begin
+    Key := OtherDataToString(Remote[i]);
+    b := AliasIndex(Base, Key);
+    if (b >= 0) and (AliasIndex(Cur, Key) < 0) and (Remote[i].LastUsedDate <= Base[b].LastUsedDate) then
+      Continue;
+    Result[n] := Remote[i];
+    Inc(n);
+  end;
+  SetLength(Result, n);
   for i := 0 to High(Cur) do
   begin
     Key := OtherDataToString(Cur[i]);
@@ -2601,9 +2720,73 @@ begin
       Result[n] := Cur[i];
     end;
   end;
+  while (NameLimit > 0) and (Length(Result) > NameLimit) do
+  begin
+    r := 0;
+    for i := 1 to High(Result) do
+      if Result[i].LastUsedDate < Result[r].LastUsedDate then
+        r := i;
+    for i := r to High(Result) - 1 do
+      Result[i] := Result[i + 1];
+    SetLength(Result, Length(Result) - 1);
+  end;
 end;
 
-procedure Merge3Profile(var Cur: TPlayerProfile; const Base, Remote: TPlayerProfile);
+function TrustedIndex(const Arr: TTrustedDeviceArray; const D: TTrustedDevice): LongInt;
+var
+  k: LongInt;
+begin
+  for k := 0 to High(Arr) do
+    if SameText(Arr[k].HWID, D.HWID) and (Arr[k].IPPrefix = D.IPPrefix) then
+      Exit(k);
+  Result := -1;
+end;
+
+{ the trusted computers of an account, a set: one this server removed (/changepass and /resetpass
+  keep only the current computer, /account untrust none) stays removed, one the database removed
+  stays removed, one added on either side is kept; a computer on both sides keeps the later
+  dates. At most MAX_TRUSTED_DEVICES, the least recently added go first. }
+function Merge3Trusted(const Cur, Base, Remote: TTrustedDeviceArray): TTrustedDeviceArray;
+var
+  i, c, n: LongInt;
+begin
+  SetLength(Result, Length(Remote) + Length(Cur));
+  n := 0;
+  for i := 0 to High(Remote) do
+  begin
+    c := TrustedIndex(Cur, Remote[i]);
+    if (c < 0) and (TrustedIndex(Base, Remote[i]) >= 0) then
+      Continue;
+    Result[n] := Remote[i];
+    if c >= 0 then
+    begin
+      if Cur[c].LastUsed > Result[n].LastUsed then
+        Result[n].LastUsed := Cur[c].LastUsed;
+      if Cur[c].Expire > Result[n].Expire then
+        Result[n].Expire := Cur[c].Expire;
+    end;
+    Inc(n);
+  end;
+  for i := 0 to High(Cur) do
+    if (TrustedIndex(Remote, Cur[i]) < 0) and (TrustedIndex(Base, Cur[i]) < 0) then
+    begin
+      Result[n] := Cur[i];
+      Inc(n);
+    end;
+  SetLength(Result, n);
+  while Length(Result) > MAX_TRUSTED_DEVICES do
+  begin
+    c := 0;
+    for i := 1 to High(Result) do
+      if Result[i].LastUsed < Result[c].LastUsed then
+        c := i;
+    for i := c to High(Result) - 1 do
+      Result[i] := Result[i + 1];
+    SetLength(Result, Length(Result) - 1);
+  end;
+end;
+
+procedure Merge3Profile(var Cur: TPlayerProfile; const Base, Remote: TPlayerProfile; NameLimit: LongInt);
 var
   Saved: TPlayerProfile;
   i, j, n: LongInt;
@@ -2613,6 +2796,24 @@ var
 begin
   Saved := Cur;
   Merge3Fields(@Cur, @Base, @Remote, ProfileFields);
+  { the password is one thing in four fields (hash, salt, rounds, date): all four come from the
+    side that changed it - field by field, two changes at once could mix the hash of one server
+    with the rounds of the other, and no password would work }
+  if (Saved.PassHash <> Base.PassHash) or (Saved.PassSalt <> Base.PassSalt) or (Saved.PassIter <> Base.PassIter) or
+     (Saved.PassSetTime <> Base.PassSetTime) then
+  begin
+    Cur.PassHash := Saved.PassHash;
+    Cur.PassSalt := Saved.PassSalt;
+    Cur.PassIter := Saved.PassIter;
+    Cur.PassSetTime := Saved.PassSetTime;
+  end
+  else
+  begin
+    Cur.PassHash := Remote.PassHash;
+    Cur.PassSalt := Remote.PassSalt;
+    Cur.PassIter := Remote.PassIter;
+    Cur.PassSetTime := Remote.PassSetTime;
+  end;
   { the points are won and lost in steps on every server: they add up like a counter }
   Cur.Points := Max(0, Remote.Points + (Saved.Points - Base.Points));
   { the protection days are earned a day at a time and spent by the daily balance: fewer here (a
@@ -2637,40 +2838,10 @@ begin
   if SameNemeses then Nemeses := Remote.TopNemeses else Nemeses := Saved.TopNemeses;
   Cur.TopVictims := Victims;
   Cur.TopNemeses := Nemeses;
-  Cur.OtherNames := Merge3Aliases(Saved.OtherNames, Base.OtherNames, Remote.OtherNames);
-  { trusted computers, season badges and achievements are sets: everything either side has }
-  Cur.TrustedDevices := Copy(Remote.TrustedDevices);
-  for i := 0 to High(Saved.TrustedDevices) do
-  begin
-    Found := False;
-    for j := 0 to High(Cur.TrustedDevices) do
-      if (Cur.TrustedDevices[j].HWID = Saved.TrustedDevices[i].HWID) and
-         (Cur.TrustedDevices[j].IPPrefix = Saved.TrustedDevices[i].IPPrefix) then
-      begin
-        if Saved.TrustedDevices[i].LastUsed > Cur.TrustedDevices[j].LastUsed then
-          Cur.TrustedDevices[j].LastUsed := Saved.TrustedDevices[i].LastUsed;
-        if Saved.TrustedDevices[i].Expire > Cur.TrustedDevices[j].Expire then
-          Cur.TrustedDevices[j].Expire := Saved.TrustedDevices[i].Expire;
-        Found := True;
-        Break;
-      end;
-    if not Found then
-    begin
-      { a computer this server removed (the list was cleared) is not brought back by the database }
-      for j := 0 to High(Base.TrustedDevices) do
-        if (Base.TrustedDevices[j].HWID = Saved.TrustedDevices[i].HWID) and
-           (Base.TrustedDevices[j].IPPrefix = Saved.TrustedDevices[i].IPPrefix) then
-          Found := True;
-      if not Found then
-      begin
-        n := Length(Cur.TrustedDevices);
-        SetLength(Cur.TrustedDevices, n + 1);
-        Cur.TrustedDevices[n] := Saved.TrustedDevices[i];
-      end;
-    end;
-  end;
-  if (Length(Saved.TrustedDevices) = 0) and (Length(Base.TrustedDevices) > 0) then
-    Cur.TrustedDevices := nil;
+  Cur.OtherNames := Merge3Aliases(Saved.OtherNames, Base.OtherNames, Remote.OtherNames, NameLimit);
+  { the trusted computers merge as a set with removals (Merge3Trusted); season badges and
+    achievements are sets: everything either side has }
+  Cur.TrustedDevices := Merge3Trusted(Saved.TrustedDevices, Base.TrustedDevices, Remote.TrustedDevices);
   Cur.Badges := Copy(Remote.Badges);
   for i := 0 to High(Saved.Badges) do
   begin
@@ -3695,6 +3866,7 @@ initialization
   SortDefs(MapFields);
   SortDefs(ServerFields);
   BuildLookup(ProfileFields, ProfileLookup);
+  BuildSharedProfileFields;
   BuildLookup(MapFields, MapLookup);
   BuildLookup(ServerFields, ServerLookup);
   SortDefs(PlayerMapFields);

@@ -44,6 +44,7 @@ type
     LastDamageTick: LongInt;
     LastPrimaryHitTick: LongInt;
     LastZone: LongInt;
+    LastZoneExact: Boolean;     { the zone came from the server's own hit test ([Bridges], 5.6) }
     LastBVX, LastBVY: Single;   { velocity of the bullet of the last hit }
     Streak: LongInt;
     RevengeOpen: Boolean;
@@ -91,6 +92,11 @@ type
                                  streak goes on in the next one }
     MultiKillCount: LongInt;
     LastKillTick: LongInt;
+    { the bullet of the last kill: its slot and the tick it was fired (a second kill by the same
+      bullet is a collateral; 5.6) }
+    LastKillBullet: LongInt;
+    LastKillOrigin: LongInt;
+    LastKillOX, LastKillOY: Single;
     KnifeKillsLife: LongInt;
     ExplosionTick: LongInt;
     ExplosionSlot: LongInt;
@@ -128,6 +134,11 @@ type
 
 procedure LiveResetSlot(var L: TLiveTable; Slot: LongInt);
 procedure LiveResetMatch(var L: TLiveTable; Tick: LongInt);
+{ The game time moved by Delta against the ticks of the server (a pause, the tick counter starting
+  again): T + Delta, at most Limit (now, for a tick in the past); 0 (not set) stays 0, and a tick
+  more than a billion before 0 is one of long ago and becomes 0 }
+function ShiftTick(T, Delta, Limit: LongInt): LongInt;
+procedure LiveShiftTicks(var L: TLiveTable; Delta, NowTick: LongInt);
 procedure LiveSetTeam(var S: TLiveSlot; Team, Tick: LongInt);
 procedure LiveCloseTeamTime(var S: TLiveSlot; Tick: LongInt);
 procedure LiveSpawn(var L: TLiveTable; Slot, Tick: LongInt; X, Y: Single);
@@ -203,6 +214,59 @@ begin
       L[S].Pair[A].InactiveKills := 0;
     end;
   end;
+end;
+
+function ShiftTick(T, Delta, Limit: LongInt): LongInt;
+var
+  V: Int64;
+begin
+  if T = 0 then
+    Exit(0);
+  V := Int64(T) + Delta;
+  if V > Limit then
+    V := Limit;
+  if V < -1000000000 then
+    V := 0;
+  Result := V;
+end;
+
+{ every tick the table keeps, moved along (ShiftTick) }
+procedure LiveShiftTicks(var L: TLiveTable; Delta, NowTick: LongInt);
+var
+  S, A, k: LongInt;
+begin
+  for S := 1 to MAX_PLAYERS do
+    with L[S] do
+    begin
+      JoinTick := ShiftTick(JoinTick, Delta, NowTick);
+      TeamSinceTick := ShiftTick(TeamSinceTick, Delta, NowTick);
+      SpawnTick := ShiftTick(SpawnTick, Delta, NowTick);
+      DeathTick := ShiftTick(DeathTick, Delta, NowTick);
+      SampleTick := ShiftTick(SampleTick, Delta, NowTick);
+      BerserkUntil := ShiftTick(BerserkUntil, Delta, MaxLongInt);
+      AnchorTick := ShiftTick(AnchorTick, Delta, NowTick);
+      LastMoveTick := ShiftTick(LastMoveTick, Delta, NowTick);
+      LastShotTick := ShiftTick(LastShotTick, Delta, NowTick);
+      for k := 0 to SHOT_RING - 1 do
+        Shots[k].Tick := ShiftTick(Shots[k].Tick, Delta, NowTick);
+      LastKillTick := ShiftTick(LastKillTick, Delta, NowTick);
+      ExplosionTick := ShiftTick(ExplosionTick, Delta, NowTick);
+      FlagGrabTick := ShiftTick(FlagGrabTick, Delta, NowTick);
+      FlagDropTick := ShiftTick(FlagDropTick, Delta, NowTick);
+      ContestedSinceTick := ShiftTick(ContestedSinceTick, Delta, NowTick);
+      ScriptTeamTick := ShiftTick(ScriptTeamTick, Delta, NowTick);
+      SwitchCountTick := ShiftTick(SwitchCountTick, Delta, NowTick);
+      for A := 1 to MAX_PLAYERS do
+        with Pair[A] do
+        begin
+          DamagedTick := ShiftTick(DamagedTick, Delta, NowTick);
+          KilledTick := ShiftTick(KilledTick, Delta, NowTick);
+          FirstDamageTick := ShiftTick(FirstDamageTick, Delta, NowTick);
+          LastDamageTick := ShiftTick(LastDamageTick, Delta, NowTick);
+          LastPrimaryHitTick := ShiftTick(LastPrimaryHitTick, Delta, NowTick);
+          WinStartTick := ShiftTick(WinStartTick, Delta, NowTick);
+        end;
+    end;
 end;
 
 procedure LiveCloseTeamTime(var S: TLiveSlot; Tick: LongInt);

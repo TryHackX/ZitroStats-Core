@@ -260,7 +260,7 @@ begin
     Inc(CurTick, TICKS_PER_SECOND);
     Ev := NewEvent(zeTick);
     Ev.I[4] := TimeLeft;
-    Ev.I[6] := GS_CTF;
+    Ev.I[5] := GS_CTF;
     Push(Ev);
   end;
 end;
@@ -707,7 +707,9 @@ begin
   Check('teams processed', WaitProcessed);
   Drain;
   Advice := Engine.TeamJoinAdvice(0, TEAM_ALPHA, 255, CurTick);
-  Check('teammatch 2/2/2/1: a new player goes to Delta', Advice = TEAM_DELTA);
+  { a team above Bravo is in use from two players on (ZSE2-04): the one in Delta plays alone }
+  Check('teammatch 2/2/2/1: Delta with one player is no team in use, a new player goes to Alpha, Bravo or Charlie',
+    (Advice >= TEAM_ALPHA) and (Advice <= TEAM_CHARLIE));
   Check('request processed', WaitProcessed);
 
   { ---- the start of a map evens the teams at once ---- }
@@ -1622,8 +1624,10 @@ begin
   Steam := 'S' + IntToStr(NextAccount - 4);
   EnterCriticalSection(Engine.StateLock);
   try
-    { no correction of the balance in the way, and Steam is waited for as long as it takes }
-    Engine.Cfg.BalanceMinPlayers := 32;
+    { no correction of the balance in the way (the four players are enough for the balance to act),
+      and Steam is waited for as long as it takes }
+    Engine.Cfg.BalanceMinPlayers := 4;
+    Engine.Cfg.BalanceCheckSeconds := 600;
     Engine.Cfg.SteamAuthWaitSeconds := 60;
     { 27 has played here (an account with nothing on it is not kept), and the balance moved him away
       from Bravo a moment ago }
@@ -1672,6 +1676,38 @@ begin
   end;
   Check('a late Steam answer: the lock is back, and the player goes back to the team he played for',
     Ok and MoveFor(27, A) and (A.P1 = TEAM_ALPHA) and (A.P2 = 0));
+
+  { ---- fewer humans than MinPlayers (4): three players in CTF, no strength judged, no lock ---- }
+  LineUp('ctf_Ash', 27, 27, [TEAM_ALPHA, TEAM_ALPHA, TEAM_BRAVO, TEAM_BRAVO], [1500, 1300, 1900, 1500]);
+  EnterCriticalSection(Engine.StateLock);
+  try
+    { joins are placed again (the parts before left it off); the balance moved 28 out of Bravo a moment ago }
+    Engine.Cfg.BalanceAssignJoins := True;
+    Engine.Bal.Slots[28].LockTeam := TEAM_BRAVO;
+    Engine.Bal.Slots[28].LockUntil := Engine.GameTick + 180 * TICKS_PER_SECOND;
+    Engine.Bal.Dirty := True;
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  Leave(30);
+  { the joins of the parts before are no longer on their way }
+  Tick(4, 300);
+  Check('three players processed', WaitProcessed);
+  Drain;
+  Advice := Engine.TeamJoinAdvice(29, TEAM_ALPHA, TEAM_BRAVO, CurTick);
+  Check(Format('3 players: the one alone in Bravo may not leave it empty (%d)', [Advice]), Advice = -1);
+  Advice := Engine.TeamJoinAdvice(28, TEAM_BRAVO, TEAM_ALPHA, CurTick);
+  Check(Format('3 players: the weaker Alpha player joins Bravo, despite the ratings and the lock (%d)', [Advice]),
+    Advice = TEAM_BRAVO);
+  Check('request processed', WaitProcessed);
+  TeamEv(28, TEAM_BRAVO);
+  Tick(1, 300);
+  Check('switch processed', WaitProcessed);
+  Drain;
+  Check('below MinPlayers the engine moves nobody after the switch', MoveCount(28) = 0);
+  Advice := Engine.TeamJoinAdvice(0, TEAM_BRAVO, 255, CurTick);
+  Check(Format('3 players, 1 against 2: a new player asking for Bravo goes to Alpha (%d)', [Advice]),
+    Advice = TEAM_ALPHA);
 
   Engine.Free;
   Console.Free;

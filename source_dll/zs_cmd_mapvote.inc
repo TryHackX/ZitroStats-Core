@@ -543,6 +543,8 @@ begin
       E.Cfg.MapVoteSeconds]), CLR_HINT);
     Out(E, Slot, Format('[Map vote] none in the first %d s of a map or with less than %d s left, a starter waits %d s',
       [E.Cfg.MapVoteBlockAfterChange, E.Cfg.MapVoteMinTimeLeft, E.Cfg.MapVoteStarterCooldown]), CLR_HINT);
+    Out(E, Slot, Format('[Map vote] after a vote the next one on the same map waits %d s, whoever starts it',
+      [E.Cfg.MapVoteGapSeconds]), CLR_HINT);
     Out(E, Slot, Format('[Map vote] at least %d player(s), maps outside the list: %s, vote percent put back: %d',
       [E.Cfg.MapVoteMinPlayers, BoolToStr(E.Cfg.MapVoteAllowAnyMap, 'yes', 'no'), E.Cfg.MapVoteRestorePercent]),
       CLR_HINT);
@@ -576,6 +578,32 @@ begin
     Out(E, Slot, Format('[Map vote] maps folder: %s (/zs_maps)', [MapCount(Length(E.MV.Files.Maps))]), CLR_HINT)
   else
     Out(E, Slot, '[Map vote] maps folder: not read (/zs_maps)', CLR_HINT);
+end;
+
+{ the maps folder as /zs_maps names it, in Room characters: from the server folder (the current one,
+  which a MapsFolder of settings.ini starts from) when it lies in it, "maps"; else, or when that is
+  still too long, its last folders after "...". The whole path would show the Windows user and the
+  layout of the disk to an admin on the server, and outgrow the line. }
+function MapsFolderText(const Folder: AnsiString; Room: LongInt): AnsiString;
+var
+  Base: AnsiString;
+  p: LongInt;
+begin
+  Result := Folder;
+  Base := IncludeTrailingPathDelimiter(GetCurrentDir);
+  if SameFileName(IncludeTrailingPathDelimiter(Folder), Base) then
+    Result := '.'
+  else if (Length(Folder) > Length(Base)) and SameFileName(Copy(Folder, 1, Length(Base)), Base) then
+    Result := Copy(Folder, Length(Base) + 1, MaxInt);
+  if Length(Result) <= Room then
+    Exit;
+  { the end of the path from the first folder that starts in it: "...\" and the rest fit Room }
+  Result := Copy(Result, Length(Result) - (Room - 4) + 1, MaxInt);
+  p := Pos(PathDelim, Result);
+  if p > 0 then
+    Result := '...' + Copy(Result, p, MaxInt)
+  else
+    Result := '...' + PathDelim + Result;
 end;
 
 { /zs_maps [rescan]: the maps folder, the files Linux may not load, the maps of the list without a
@@ -615,11 +643,11 @@ begin
     Out(E, Slot, 'Usage: /zs_maps [rescan]', CLR_WARN);
     Exit;
   end;
-  Out(E, Slot, '[Maps] folder: ' + E.MapVoteFolder, CLR_HINT);
+  Out(E, Slot, '[Maps] folder: ' + MapsFolderText(E.MapVoteFolder, LINE_W - 15), CLR_HINT);
   if not E.MV.FilesKnown then
     Out(E, Slot, '[Maps] The folder has not been read yet (/zs_maps rescan reads it now).', CLR_WARN)
   else if E.MV.Files.Error <> '' then
-    Out(E, Slot, '[Maps] The folder could not be read: ' + E.MV.Files.Error, CLR_BAD)
+    Out(E, Slot, '[Maps] The folder could not be read: ' + Clip(E.MV.Files.Error, LINE_W - 37), CLR_BAD)
   else if not E.MV.Files.Found then
     Out(E, Slot, '[Maps] The folder was not found: set [MapVote] MapsFolder in settings.ini, then /zs_reload.', CLR_BAD)
   else

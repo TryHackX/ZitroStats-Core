@@ -1,7 +1,7 @@
 { zs_commands: weapons - personal arsenal, deep dive, matchups and weapon rankings }
 
 const
-  WEAPON_METRICS: array[0..33] of TMetricDef = (
+  WEAPON_METRICS: array[0..37] of TMetricDef = (
     (Aliases: ' kills kill k '; Header: 'Kills'; Fmt: mfInt; Asc: False),                           { 0 }
     (Aliases: ' deaths death d '; Header: 'Deaths'; Fmt: mfInt; Asc: False),
     (Aliases: ' kd kdr '; Header: 'K/D'; Fmt: mfDec2; Asc: False),
@@ -35,7 +35,12 @@ const
     (Aliases: ' deatheq dmgd '; Header: 'DmgDeaths'; Fmt: mfInt; Asc: False),                         { 30 }
     (Aliases: ' dmgperkill dpk '; Header: 'Dmg/Kill'; Fmt: mfInt; Asc: True),
     (Aliases: ' dmgperdeath dpd '; Header: 'Dmg/Death'; Fmt: mfInt; Asc: False),
-    (Aliases: ' kdmgratio kdmg '; Header: 'KDmgRatio'; Fmt: mfDec2; Asc: True)                         { 33 }
+    (Aliases: ' kdmgratio kdmg '; Header: 'KDmgRatio'; Fmt: mfDec2; Asc: True),                        { 33 }
+    { [Bridges] (5.6): the hits and kills measured from where and when their bullet was made }
+    (Aliases: ' longesthit longhit '; Header: 'LongHit'; Fmt: mfMeters; Asc: False),
+    (Aliases: ' hitdist avghitdist '; Header: 'HitDist'; Fmt: mfMeters; Asc: False),                   { 35 }
+    (Aliases: ' hitair avghitair hitflight '; Header: 'HitAir'; Fmt: mfSec; Asc: False),
+    (Aliases: ' killair avgkillair killflight '; Header: 'KillAir'; Fmt: mfSec; Asc: False)             { 37 }
   );
 
   DIST_BUCKET_NAMES: array[0..4] of AnsiString = ('<10m', '10-25m', '25-50m', '50-100m', '100m+');
@@ -68,6 +73,14 @@ begin
     if V.Longest > T[S].Longest then
       T[S].Longest := V.Longest;
     R := @P.Weapons[S];
+    T[S].HitDistSum := T[S].HitDistSum + R^.HitDistSum;
+    Inc(T[S].HitDistCount, R^.HitDistCount);
+    if R^.LongestHit > T[S].LongestHit then
+      T[S].LongestHit := R^.LongestHit;
+    Inc(T[S].HitAirTicks, R^.HitAirTicks);
+    Inc(T[S].HitAirCount, R^.HitAirCount);
+    Inc(T[S].KillAirTicks, R^.KillAirTicks);
+    Inc(T[S].KillAirCount, R^.KillAirCount);
     Inc(T[S].Reloads, R^.Reloads);
     Inc(T[S].ReloadsManual, R^.ReloadsManual);
     Inc(T[S].RoundsDropped, R^.RoundsDropped);
@@ -84,7 +97,54 @@ begin
   end;
 end;
 
-procedure CollectWeaponTotals(E: TZSEngine; var T: array of TWeaponTotals; Shared: Boolean = False);
+type
+  { what was added up over every account of this server, of which engine and data, and when }
+  TSumsStamp = record
+    Owner, Data: Pointer;
+    Since: TDateTime;
+    AtMs: Int64;
+    Accounts, Live: LongInt;
+  end;
+
+const
+  { The views of the whole server add up every account: 239 ms with 50 000 of them. For a player
+    they use the sums of up to this long ago (the server console and the export add them up anew),
+    so a few players and admins asking again and again keep the engine thread no longer. }
+  SUMS_MAX_AGE_MS = 10000;
+
+var
+  WeaponSumsStamp: TSumsStamp;
+  WeaponSums: array[0..WSLOT_COUNT - 1] of TWeaponTotals;
+
+{ the age the sums of every account may have for what Slot asks: SUMS_MAX_AGE_MS for a player,
+  0 for the server console (added up now, and kept for the players) }
+function SumsAge(Slot: LongInt): Int64;
+begin
+  if (Slot >= 1) and (Slot <= MAX_PLAYERS) then
+    Result := SUMS_MAX_AGE_MS
+  else
+    Result := 0;
+end;
+
+{ sums of St may stand for the accounts of E now: taken less than MaxAgeMs ago (0 = never) of
+  this engine and data, with as many accounts }
+function SumsFresh(const St: TSumsStamp; E: TZSEngine; MaxAgeMs: Int64): Boolean;
+begin
+  Result := (MaxAgeMs > 0) and (St.Owner = Pointer(E)) and (St.Data = Pointer(E.DB)) and (St.Since = E.PerfSince) and
+    (St.Accounts = E.DB.ProfileCount) and (St.Live = E.DB.LiveProfiles) and (MonoMs - St.AtMs < MaxAgeMs);
+end;
+
+procedure SumsTaken(var St: TSumsStamp; E: TZSEngine);
+begin
+  St.Owner := Pointer(E);
+  St.Data := Pointer(E.DB);
+  St.Since := E.PerfSince;
+  St.Accounts := E.DB.ProfileCount;
+  St.Live := E.DB.LiveProfiles;
+  St.AtMs := MonoMs;
+end;
+
+procedure CollectWeaponTotals(E: TZSEngine; var T: array of TWeaponTotals; Shared: Boolean = False; MaxAgeMs: Int64 = -1);
 var
   k, S: LongInt;
   SV: PServerRecords;
@@ -92,16 +152,30 @@ var
   Sum: TPlayerProfile;
 begin
   SV := SharedServerView(E, Shared, SrvTmp);
+  { the accounts of this server: added up now, or for a player's view as a moment ago }
+  if SumsFresh(WeaponSumsStamp, E, MaxAgeMs) then
+    for S := 0 to WSLOT_COUNT - 1 do
+      T[S] := WeaponSums[S]
+  else
+  begin
+    for S := 0 to WSLOT_COUNT - 1 do
+      FillChar(T[S], SizeOf(T[S]), 0);
+    for k := 0 to E.DB.ProfileCount - 1 do
+      if E.DB.Valid(k) then
+        AddWeaponTotals(T, E.DB.Profiles[k]^);
+    if MaxAgeMs >= 0 then
+    begin
+      for S := 0 to WSLOT_COUNT - 1 do
+        WeaponSums[S] := T[S];
+      SumsTaken(WeaponSumsStamp, E);
+    end;
+  end;
   for S := 0 to WSLOT_COUNT - 1 do
   begin
-    FillChar(T[S], SizeOf(T[S]), 0);
     T[S].WSlot := S;
     T[S].Picks := SV^.WeaponGlobal[S].Picks;
     T[S].VestKills := SV^.WeaponGlobal[S].VestKills;
   end;
-  for k := 0 to E.DB.ProfileCount - 1 do
-    if E.DB.Valid(k) then
-      AddWeaponTotals(T, E.DB.Profiles[k]^);
   { the other servers: their accounts added up }
   if Shared and SharedAccountSums(E, True, Sum) then
     AddWeaponTotals(T, Sum);
@@ -294,6 +368,10 @@ begin
     31: Result := SafeDivD(T.Damage, T.Kills);
     32: Result := SafeDivD(T.DamageIn, T.Deaths);
     33: Result := DmgKDRatio(T.Damage, T.Kills, T.DamageIn, T.Deaths);
+    34: Result := T.LongestHit;
+    35: Result := SafeDivD(T.HitDistSum, T.HitDistCount);
+    36: Result := SafeDivD(T.HitAirTicks, T.HitAirCount) / TICKS_PER_SECOND;
+    37: Result := SafeDivD(T.KillAirTicks, T.KillAirCount) / TICKS_PER_SECOND;
     else Result := 0;
   end;
 end;
@@ -323,14 +401,88 @@ begin
     31: Result := T.Kills > 0;
     32: Result := T.Deaths > 0;
     33: Result := (T.Kills > 0) and (T.Deaths > 0) and (T.DamageIn > 0);
+    34, 35: Result := SlotHitMeasured(T.WSlot) and (T.HitDistCount > 0);
+    36: Result := SlotAirTimed(T.WSlot) and (T.HitAirCount > 0);
+    37: Result := SlotAirTimed(T.WSlot) and (T.KillAirCount > 0);
     else Result := True;
   end;
+end;
+
+{ A share or an average of a weapon is ranked only when made of enough (SampleNeed, as
+  PlayerMetricNeed): the count it needs of WeaponMetricCount, What names it; 0 for the others }
+function WeaponMetricNeed(Id: LongInt; out What: AnsiString): LongInt;
+begin
+  What := '';
+  Result := 0;
+  case Id of
+    5: begin What := 'shots'; Result := SAMPLE_SHOTS; end;
+    7: begin What := 'hits'; Result := SAMPLE_HITS; end;
+    12: begin What := 'measured kills'; Result := SAMPLE_EVENTS; end;
+    13, 37: begin What := 'timed kills'; Result := SAMPLE_EVENTS; end;
+    35: begin What := 'measured hits'; Result := SAMPLE_EVENTS; end;
+    36: begin What := 'timed hits'; Result := SAMPLE_EVENTS; end;
+  end;
+end;
+
+function WeaponMetricCount(SV: PServerRecords; const T: TWeaponTotals; Id: LongInt): Double;
+begin
+  case Id of
+    5: Result := T.Shots;
+    7: Result := T.Hits;
+    12: Result := SV^.WeaponGlobal[T.WSlot].KillDistCount;
+    13: Result := SV^.WeaponGlobal[T.WSlot].TTKCount;
+    35: Result := T.HitDistCount;
+    36: Result := T.HitAirCount;
+    37: Result := T.KillAirCount;
+    else Result := 0;
+  end;
+end;
+
+{ a weapon metric with a value the tables rank: one that means something for the weapon
+  (WeaponMetricDefined) and, for a share or an average, is made of enough; otherwise "-", last }
+function WeaponMetricRanked(E: TZSEngine; SV: PServerRecords; const T: TWeaponTotals; Id: LongInt): Boolean;
+var
+  What: AnsiString;
+  Need: Double;
+begin
+  Result := WeaponMetricDefined(SV, T, Id);
+  if Result then
+  begin
+    Need := SampleNeed(E, WeaponMetricNeed(Id, What));
+    Result := (Need <= 0) or (WeaponMetricCount(SV, T, Id) >= Need);
+  end;
+end;
+
+{ the note under a weapon table of what each of its metrics needs, when a weapon of it (Totals at
+  Rows) had too few for one }
+procedure WeaponNeedNote(E: TZSEngine; Slot: LongInt; SV: PServerRecords; const Totals: array of TWeaponTotals;
+  const Rows, Ids: TIntArray);
+var
+  f, k: LongInt;
+  What: AnsiString;
+  Need: Double;
+  Items: TStringArray;
+begin
+  Items := nil;
+  for f := 0 to High(Ids) do
+  begin
+    Need := SampleNeed(E, WeaponMetricNeed(Ids[f], What));
+    if Need <= 0 then
+      Continue;
+    for k := 0 to High(Rows) do
+      if WeaponMetricDefined(SV, Totals[Rows[k]], Ids[f]) and not WeaponMetricRanked(E, SV, Totals[Rows[k]], Ids[f]) then
+      begin
+        PushNeed(Items, NeedItem(WEAPON_METRICS[Ids[f]].Header, What, Need));
+        Break;
+      end;
+  end;
+  NeedNote(E, Slot, Items);
 end;
 
 { the text of a weapon metric in a column that holds MaxLen characters }
 function WeaponMetricCell(E: TZSEngine; SV: PServerRecords; const T: TWeaponTotals; Id, MaxLen: LongInt): AnsiString;
 begin
-  if WeaponMetricDefined(SV, T, Id) then
+  if WeaponMetricRanked(E, SV, T, Id) then
     Result := Copy(MetricText(WEAPON_METRICS[Id].Fmt, WeaponMetricValue(E, SV, T, Id)), 1, MaxLen)
   else
     Result := '-';
@@ -351,6 +503,7 @@ begin
   Out(E, Slot, '  picks, pick% (share of its group: the primaries, or socom/knife/saw/law)', WHITE);
   Out(E, Slot, '  killeq, deatheq (damage as kills / deaths), dmgperkill, dmgperdeath, kdmgratio', WHITE);
   Out(E, Slot, '  alphapicks, bravopicks (spawns with the weapon on that team)', WHITE);
+  Out(E, Slot, '  longesthit, hitdist (the hits'' distance), hitair, killair (how long the bullets flew)', WHITE);
   Out(E, Slot, '[Reload Metrics]', CLR_HEADER);
   Out(E, Slot, '  reloads, reloadtime (average), finished (% run through), progress (how far one gets)', WHITE);
   Out(E, Slot, '  rdeaths, rdeath% (killed reloading), manual (% with rounds left), dropped (rounds lost)', WHITE);
@@ -478,7 +631,7 @@ const
   C1: array[0..7] of LongInt = (5, 18, 14, 9, 9, 9, 10, 9);
 var
   Tokens, Heads: TStringArray;
-  Ids, Cand, Rows: TIntArray;
+  Ids, Cand, Rows, PageRows: TIntArray;
   Widths: array[0..4] of LongInt;
   Totals: array[0..WSLOT_COUNT - 1] of TWeaponTotals;
   k, f, n, Pages, First, NameW, WS: LongInt;
@@ -538,12 +691,12 @@ begin
   begin
     Out(E, Slot, 'No valid weapon metric given.', CLR_BAD);
     if Ignored <> '' then
-      Out(E, Slot, '[Note] Unknown: ' + Ignored, CLR_HINT);
+      Out(E, Slot, '[Note] Unknown: ' + Clip(Ignored, LINE_W - 16), CLR_HINT);
     TopWeaponsByHelp(E, Slot);
     Exit;
   end;
 
-  CollectWeaponTotals(E, Totals, E.Cfg.MySQLShareWeapons);
+  CollectWeaponTotals(E, Totals, E.Cfg.MySQLShareWeapons, SumsAge(Slot));
   SV := WeaponServer(E);
   AllKills := 0;
   for k := 0 to WSLOT_COUNT - 1 do
@@ -560,7 +713,7 @@ begin
   for k := 0 to n - 1 do
   begin
     for f := 0 to High(Ids) do
-      if WeaponMetricDefined(SV, Totals[Cand[k]], Ids[f]) then
+      if WeaponMetricRanked(E, SV, Totals[Cand[k]], Ids[f]) then
         SortKeys[k * SortCols + f] := SortValue(WeaponMetricValue(E, SV, Totals[Cand[k]], Ids[f]), WEAPON_METRICS[Ids[f]].Asc)
       else
         SortKeys[k * SortCols + f] := -MaxDouble;
@@ -614,8 +767,15 @@ begin
       Out(E, Slot, TrimRight(Line), RowColor(k + 1, False));
     end;
   end;
+  PageRows := nil;
+  for k := First to Min(n - 1, First + PER_PAGE - 1) do
+  begin
+    SetLength(PageRows, Length(PageRows) + 1);
+    PageRows[High(PageRows)] := Cand[Rows[k]];
+  end;
+  WeaponNeedNote(E, Slot, SV, Totals, PageRows, Ids);
   if Ignored <> '' then
-    Out(E, Slot, '[Note] Ignored unknown metric(s): ' + Ignored, CLR_HINT);
+    Out(E, Slot, '[Note] Ignored unknown metric(s): ' + Clip(Ignored, LINE_W - 34), CLR_HINT);
   PageHint(E, Slot, Page, Pages, 'weapons');
   Remember(E, Slot, QK_TOPWEAPONS, Canon, Page, Pages);
 end;
@@ -869,7 +1029,7 @@ end;
 { !wep: the kills of the account with one weapon as !serverwep shows those of the whole server - by
   distance, the average distance, the time from the first hit to the kill and the kills of a victim
   with a vest. The account keeps them since 5.5: older kills have none. }
-procedure WeaponOwnSection(E: TZSEngine; Slot: LongInt; const WS: TWeaponStats; Kills: Int64; W: LongInt);
+procedure WeaponOwnSection(E: TZSEngine; Slot: LongInt; const WS: TWeaponStats; Kills: Int64; S, W: LongInt);
 var
   k: LongInt;
   Buckets: array[0..4] of Int64;
@@ -888,9 +1048,22 @@ begin
   { the vest is a bonus: a server without bonuses has no vest kills }
   if WS.VestKills > 0 then
     PushCell(Cells, 'Vest kills: ' + Num(WS.VestKills));
+  { [Bridges] (5.6): the hits and kills measured from where and when their bullet was made }
+  if SlotHitMeasured(S) and (WS.HitDistCount > 0) then
+  begin
+    PushCell(Cells, 'Longest Hit: ' + MetersText(WS.LongestHit));
+    PushCell(Cells, 'Avg Hit Dist: ' + AvgMetersText(WS.HitDistSum, WS.HitDistCount));
+  end;
+  if SlotAirTimed(S) and (WS.HitAirCount + WS.KillAirCount > 0) then
+  begin
+    PushCell(Cells, 'Avg Hit Air: ' + AvgAirText(WS.HitAirTicks, WS.HitAirCount));
+    PushCell(Cells, 'Avg Kill Air: ' + AvgAirText(WS.KillAirTicks, WS.KillAirCount));
+  end;
   FlowCells(E, Slot, Cells, 3, WHITE);
   if (Kills > 0) and (WS.KillDistCount + WS.TTKCount + WS.VestKills = 0) then
     Out(E, Slot, 'Counted for every account since 5.5: the kills before have no distance or time here.', CLR_HINT);
+  if (WS.Hits > 0) and (WS.HitDistCount = 0) and SlotHitMeasured(S) then
+    Out(E, Slot, 'The hits'' distance and air time: counted since 5.6, while [Bridges] reads the server.', CLR_HINT);
 end;
 
 { the weapon names, for !wep help and !serverwep help }
@@ -922,9 +1095,24 @@ begin
     WeaponHSText(T.WSlot, T.Headshots, T.Hits), Dmg(T.Damage), FormatDurationShort(T.Time)], SERVER_WEAPON_COLS, CLR_SHOOTING);
 end;
 
-{ the best account with one weapon: most kills, and the best accuracy of those who shot enough }
+type
+  { the best accounts with a weapon as WeaponBestPlayers found them, for SumsFresh }
+  TBestPlayers = record
+    Stamp: TSumsStamp;
+    Shared: Boolean;
+    KillName, AccName: AnsiString;
+    KillCount: Int64;
+    AccValue: Double;
+    Users: LongInt;
+  end;
+
+var
+  BestPlayers: array[0..WSLOT_COUNT - 1] of TBestPlayers;
+
+{ the best account with one weapon: most kills, and the best accuracy of those who shot enough;
+  MaxAgeMs as for CollectWeaponTotals }
 procedure WeaponBestPlayers(E: TZSEngine; S: LongInt; out KillName, AccName: AnsiString;
-  out KillCount: Int64; out AccValue: Double; out Users: LongInt);
+  out KillCount: Int64; out AccValue: Double; out Users: LongInt; MaxAgeMs: Int64 = -1);
 const
   MIN_SHOTS = 200;
 var
@@ -934,12 +1122,25 @@ var
   Entries: TRankEntryArray;
   P: PPlayerProfile;
   Tmp: TPlayerProfile;
+  Shared: Boolean;
 begin
   KillName := '';
   AccName := '';
   KillCount := 0;
   AccValue := 0;
   Users := 0;
+  if (S < 0) or (S >= WSLOT_COUNT) then
+    Exit;
+  Shared := RankingShared(E);
+  if SumsFresh(BestPlayers[S].Stamp, E, MaxAgeMs) and (BestPlayers[S].Shared = Shared) then
+  begin
+    KillName := BestPlayers[S].KillName;
+    AccName := BestPlayers[S].AccName;
+    KillCount := BestPlayers[S].KillCount;
+    AccValue := BestPlayers[S].AccValue;
+    Users := BestPlayers[S].Users;
+    Exit;
+  end;
   { the accounts of the rankings: with SharedRankings those of every server }
   Entries := RankingEntries(E);
   for k := 0 to High(Entries) do
@@ -967,7 +1168,22 @@ begin
       end;
     end;
   end;
+  if MaxAgeMs >= 0 then
+  begin
+    BestPlayers[S].Shared := Shared;
+    BestPlayers[S].KillName := KillName;
+    BestPlayers[S].AccName := AccName;
+    BestPlayers[S].KillCount := KillCount;
+    BestPlayers[S].AccValue := AccValue;
+    BestPlayers[S].Users := Users;
+    SumsTaken(BestPlayers[S].Stamp, E);
+  end;
 end;
+
+var
+  { every account's counters added up (!serverweapons), for SumsFresh; the lists of a profile stay empty }
+  AccountSumsStamp: TSumsStamp;
+  AccountSums: TPlayerProfile;
 
 { !serverweapons: the same breakdown as !allweapons, counted over every account }
 procedure CmdServerWeapons(E: TZSEngine; Slot: LongInt);
@@ -984,7 +1200,7 @@ var
   SV: PServerRecords;
   Cells: TStringArray;
 begin
-  CollectWeaponTotals(E, Totals, E.Cfg.MySQLShareWeapons);
+  CollectWeaponTotals(E, Totals, E.Cfg.MySQLShareWeapons, SumsAge(Slot));
   SV := WeaponServer(E);
   AllKills := 0;
   for S := 0 to WSLOT_COUNT - 1 do
@@ -1019,12 +1235,19 @@ begin
       BestKill := S;
     Picks[S] := Totals[S].Picks;
   end;
-  { the counters of every account added up, for the same sections as !allweapons; with
-    SharedWeapons those of the other servers as well }
-  ClearProfile(Sum);
-  for k := 0 to E.DB.ProfileCount - 1 do
-    if E.DB.Valid(k) then
-      SumProfileCounters(Sum, E.DB.Profiles[k]^);
+  { the counters of every account added up, for the same sections as !allweapons (for a player as a
+    moment ago, SumsAge); with SharedWeapons those of the other servers as well }
+  if SumsFresh(AccountSumsStamp, E, SumsAge(Slot)) then
+    Sum := AccountSums
+  else
+  begin
+    ClearProfile(Sum);
+    for k := 0 to E.DB.ProfileCount - 1 do
+      if E.DB.Valid(k) then
+        SumProfileCounters(Sum, E.DB.Profiles[k]^);
+    AccountSums := Sum;
+    SumsTaken(AccountSumsStamp, E);
+  end;
   if SharedAccountSums(E, E.Cfg.MySQLShareWeapons, Others) then
     SumProfileCounters(Sum, Others);
   Section(E, Slot, 'Server totals', W);
@@ -1081,12 +1304,12 @@ begin
   if S < 0 then
     Exit;
   Wep := SlotWeapon(S);
-  CollectWeaponTotals(E, Totals, E.Cfg.MySQLShareWeapons);
+  CollectWeaponTotals(E, Totals, E.Cfg.MySQLShareWeapons, SumsAge(Slot));
   T := Totals[S];
   AllKills := 0;
   for k := 0 to WSLOT_COUNT - 1 do
     Inc(AllKills, Totals[k].Kills);
-  WeaponBestPlayers(E, S, KillName, AccName, KillCount, AccValue, Users);
+  WeaponBestPlayers(E, S, KillName, AccName, KillCount, AccValue, Users, SumsAge(Slot));
 
   { every kill with this weapon is somebody's death to it, and the damage taken from it is the
     damage dealt with it: over the whole server the share of all kills says how much it is used,
@@ -1114,6 +1337,18 @@ begin
     PushCell(Cells, 'Longest: ' + FloatStr(T.Longest, 1) + 'm')
   else
     PushCell(Cells, 'Longest: -');
+  { [Bridges] (5.6): the hits and kills measured from where and when their bullet was made (counted while
+    the server is read: nothing to show on a server without it) }
+  if SlotHitMeasured(S) and (T.HitDistCount > 0) then
+  begin
+    PushCell(Cells, 'Longest Hit: ' + MetersText(T.LongestHit));
+    PushCell(Cells, 'Avg Hit Dist: ' + AvgMetersText(T.HitDistSum, T.HitDistCount));
+  end;
+  if SlotAirTimed(S) and (T.HitAirCount + T.KillAirCount > 0) then
+  begin
+    PushCell(Cells, 'Avg Hit Air: ' + AvgAirText(T.HitAirTicks, T.HitAirCount));
+    PushCell(Cells, 'Avg Kill Air: ' + AvgAirText(T.KillAirTicks, T.KillAirCount));
+  end;
   FlowCells(E, Slot, Cells, 3, CLR_SHOOTING);
   if KillName <> '' then
     Out(E, Slot, Format('Top killer: %s (%s)', [KillName, Num(KillCount)]), CLR_TOP1);
@@ -1169,6 +1404,13 @@ begin
   Result.Damage := V.Damage;
   Result.DamageIn := V.DamageIn;
   Result.Longest := V.Longest;
+  Result.HitDistSum := P.Weapons[S].HitDistSum;
+  Result.HitDistCount := P.Weapons[S].HitDistCount;
+  Result.LongestHit := P.Weapons[S].LongestHit;
+  Result.HitAirTicks := P.Weapons[S].HitAirTicks;
+  Result.HitAirCount := P.Weapons[S].HitAirCount;
+  Result.KillAirTicks := P.Weapons[S].KillAirTicks;
+  Result.KillAirCount := P.Weapons[S].KillAirCount;
 end;
 
 { a cell of the plain weapon tables, as WeaponLine and WeaponTotalsLine write it }
@@ -1295,6 +1537,7 @@ begin
   Out(E, Slot, '[Weapon Metrics]', CLR_HEADER);
   Out(E, Slot, '  kills, deaths, kd, shots, hits, acc, hs, hs%, dmg, dmgtaken, dmgratio, time, longest', WHITE);
   Out(E, Slot, '  killeq, deatheq (damage as kills / deaths), dmgperkill, dmgperdeath, kdmgratio', WHITE);
+  Out(E, Slot, '  longesthit, hitdist (the hits'' distance), hitair, killair (how long the bullets flew)', WHITE);
   if Server then
   begin
     Out(E, Slot, '  avgdist (average kill distance), ttk (average time to kill), vestkills', WHITE);
@@ -1316,9 +1559,9 @@ end;
 procedure WeaponsByNotes(E: TZSEngine; Slot: LongInt; const Unknown, ServerOnly: AnsiString);
 begin
   if Unknown <> '' then
-    Out(E, Slot, '[Note] Ignored unknown metric(s): ' + Unknown, CLR_HINT);
+    Out(E, Slot, '[Note] Ignored unknown metric(s): ' + Clip(Unknown, LINE_W - 34), CLR_HINT);
   if ServerOnly <> '' then
-    Out(E, Slot, '[Note] Counted for the whole server only (!serverweaponsby): ' + ServerOnly, CLR_HINT);
+    Out(E, Slot, '[Note] Counted for the whole server only (!serverweaponsby): ' + Clip(ServerOnly, LINE_W - 61), CLR_HINT);
 end;
 
 { A weapon table sorted by metrics: the weapons of the plain table (Shown), best first by the first
@@ -1344,7 +1587,7 @@ begin
   for k := 0 to n - 1 do
   begin
     for f := 0 to High(Ids) do
-      if WeaponMetricDefined(SV, Totals[Shown[k]], Ids[f]) then
+      if WeaponMetricRanked(E, SV, Totals[Shown[k]], Ids[f]) then
         SortKeys[k * SortCols + f] := SortValue(WeaponMetricValue(E, SV, Totals[Shown[k]], Ids[f]), WEAPON_METRICS[Ids[f]].Asc)
       else
         SortKeys[k * SortCols + f] := -MaxDouble;
@@ -1421,6 +1664,7 @@ begin
     Line := Copy(Cells[k], 0, Cols);
     Row(E, Slot, Line, Padded, RowColor(k + 1, False));
   end;
+  WeaponNeedNote(E, Slot, SV, Totals, Shown, Ids);
 end;
 
 { !allweaponsby <metrics> [player], !allweaponsbyi <metrics> <ranking position>: the table of
@@ -1507,7 +1751,7 @@ begin
     WeaponsByHelp(E, Slot, True);
     Exit;
   end;
-  CollectWeaponTotals(E, Totals, E.Cfg.MySQLShareWeapons);
+  CollectWeaponTotals(E, Totals, E.Cfg.MySQLShareWeapons, SumsAge(Slot));
   AllKills := 0;
   for S := 0 to WSLOT_COUNT - 1 do
     Inc(AllKills, Totals[S].Kills);
@@ -1609,7 +1853,7 @@ begin
   ReloadSection(E, Slot, Wep, ReloadTotalsOf(P^.Weapons[S]), W);
 
   { the account's own distances and times to kill; the whole server's are !serverwep's }
-  WeaponOwnSection(E, Slot, P^.Weapons[S], V.Kills, W);
+  WeaponOwnSection(E, Slot, P^.Weapons[S], V.Kills, S, W);
 
   case Wep of
     WEP_M79:

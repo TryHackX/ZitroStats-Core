@@ -190,6 +190,14 @@ begin
     Identity.SteamAuthFailed(E.Slot);
 end;
 
+{ ZS_Ev_Admin (API 17): the server's admin rights of a human changed while he plays (the Steam admins
+  of Basic-Extended, /adm, remote.txt); the notices to the admins (NotifyAdmins) follow them }
+procedure TZSEngine.EvAdmin(var E: TZSEvent);
+begin
+  if SlotValid(E.Slot) and Live[E.Slot].Human then
+    Live[E.Slot].Admin := E.I[0] <> 0;
+end;
+
 { The first real primary (Which 0) and secondary (1) weapon of a life are the player's picks,
   whether they come with the spawn or - with the weapon menu open at the spawn, which gives no
   weapon (255) - with the first weapon change after it. A later change in the same life is none. }
@@ -240,7 +248,7 @@ begin
   NotePick(S, 1, E.I[1]);
 end;
 
-procedure TZSEngine.CountShots(Slot, Weapon, Count: LongInt);
+procedure TZSEngine.CountShots(Slot, Weapon, Count: LongInt; Bullets: Boolean = False);
 var
   Idx, W, N: LongInt;
   P: PPlayerProfile;
@@ -250,7 +258,12 @@ begin
     Exit;
   P := DB.Profiles[Idx];
   W := WepSlot(Weapon);
-  N := Count * Max(1, ShotMultiplier(Weapon));
+  { the ammunition counts rounds: a round of the Desert Eagles is two bullets, a shell of the Spas-12
+    six pellets; the hook counts the bullets themselves (EvBullet) }
+  if Bullets then
+    N := Count
+  else
+    N := Count * Max(1, ShotMultiplier(Weapon));
   if CountsForAccuracy(Weapon) then
     Inc(P^.Shots, N);
   if W >= 0 then
@@ -270,7 +283,7 @@ end;
 
 procedure TZSEngine.EvShot(var E: TZSEvent);
 begin
-  if not SlotValid(E.Slot) then
+  if not SlotValid(E.Slot) or FBrHook then
     Exit;
   LiveNoteShot(Live[E.Slot], GameTick, E.I[0], E.F[0], E.F[1]);
   if Live[E.Slot].Human and StatsOn then
@@ -281,7 +294,8 @@ procedure TZSEngine.EvGrenade(var E: TZSEvent);
 var
   W: LongInt;
 begin
-  if not SlotValid(E.Slot) then
+  { with the hook every grenade is a bullet of its own (EvBullet) }
+  if not SlotValid(E.Slot) or FBrHook then
     Exit;
   { the script only sees the grenade count drop; a cluster kit picked up earlier tells the type }
   if (E.I[1] <> 0) or Live[E.Slot].ClusterNades then
@@ -295,11 +309,127 @@ end;
 
 procedure TZSEngine.EvKnifeThrow(var E: TZSEvent);
 begin
-  if not SlotValid(E.Slot) then
+  if not SlotValid(E.Slot) or FBrHook then
     Exit;
   LiveNoteShot(Live[E.Slot], GameTick, WEP_THROWNKNIFE, E.F[0], E.F[1]);
   if Live[E.Slot].Human and StatsOn then
     CountShots(E.Slot, WEP_THROWNKNIFE, 1);
+end;
+
+{ ---------------- [Bridges] (5.6) ---------------- }
+
+{ Bullets the server made (the hook in CreateBullet, ZS_Frame), added up for one player, weapon,
+  kind and stance in a tick: Slot = their owner, I[0] the weapon number (50 frag grenade, 51
+  cluster grenade, 53 thrown knife, 30 stationary gun), I[1] how many, I[2] SK_SHOT 1 (a shot: a
+  bullet, each pellet of the Spas-12, each of the two of the Desert Eagles, a flame, a cut of the
+  saw) or SK_THROW 2 (a grenade), I[3] how the owner stood when he fired (POSTURE_*, -1 = not
+  known); F[0], F[1] where the first of them was made. Blows, a cluster's fragments, the flames of
+  lava and the scripts' bullets never come here. }
+procedure TZSEngine.EvBullet(var E: TZSEvent);
+var
+  S, W, N, Idx, Pos: LongInt;
+  P: PPlayerProfile;
+  { [Matrix]: the counters of the shooter before these shots }
+  MxS: TMxSnap;
+begin
+  S := E.Slot;
+  if not SlotValid(S) then
+    Exit;
+  W := E.I[0];
+  N := Max(1, E.I[1]);
+  LiveNoteShot(Live[S], E.Tick, W, E.F[0], E.F[1]);
+  if not Live[S].Human or not StatsOn then
+    Exit;
+  Idx := Identity.StatsIndex(S);
+  if not DB.Valid(Idx) then
+    Exit;
+  CountShots(S, W, N, True);
+  { the accuracy by stance: the shots of the guns that count for the accuracy }
+  Pos := E.I[3];
+  if (E.I[2] = 1) and CountsForAccuracy(W) and (Pos >= POSTURE_STAND) and (Pos <= POSTURE_AIR) then
+  begin
+    P := DB.Profiles[Idx];
+    MxSnap(Self, Idx, MxS);
+    Inc(P^.StanceShots[Pos], N);
+    MxFollow(Self, MxS);
+    DB.Touch(Idx);
+  end;
+end;
+
+{ A bot came to life or died (ZS_Frame reads every bot's record): bots send no spawn, and a bot a
+  bot killed sends no kill. I[0] = 1 alive, F[0], F[1] where. The humans' lives come from their
+  own events. }
+procedure TZSEngine.EvLife(var E: TZSEvent);
+var
+  S: LongInt;
+begin
+  S := E.Slot;
+  if not SlotValid(S) or Live[S].Human then
+    Exit;
+  if E.I[0] <> 0 then
+  begin
+    if not Live[S].Alive then
+    begin
+      LiveSpawn(Live, S, GameTick, E.F[0], E.F[1]);
+      if Live[S].Team <> TEAM_SPEC then
+        RoundJoin(S);
+    end;
+  end
+  else if Live[S].Alive then
+  begin
+    LiveLifeEnded(Live, S, GameTick);
+    RoundCheck(0);
+  end;
+end;
+
+{ what the game thread reads now: I[0] bit 1 the hook (every bullet comes from it: the ammunition
+  counts no shots any more), bit 2 the memory (the bots' lives are known) }
+procedure TZSEngine.EvBridge(var E: TZSEvent);
+var
+  Old: LongInt;
+begin
+  FBrHook := E.I[0] and 1 <> 0;
+  FBrMem := E.I[0] and 2 <> 0;
+  { the server's console hears when the hooks or the reading change (the map's walls change with
+    every map: not those) }
+  Old := FBrState;
+  FBrState := E.I[0] and 7;
+  if (FBrState <> Old) and (E.S1 <> '') then
+    WriteServer('[ZitroStats] bridges: ' + E.S1);
+end;
+
+{ the walls of the map that starts, for the engine's rays: maps/<map>.pms of the server's maps
+  folder ([MapVote] MapsFolder), when [Bridges] MapGeometry is on }
+procedure TZSEngine.GeoLoad(const MapName: AnsiString);
+var
+  F: AnsiString;
+begin
+  FGeo.Clear;
+  FGeoResult := GEO_NO_FILE;
+  BridgeGeoReady := 0;
+  if not Cfg.BridgeGeometry or (MapName = '') then
+    Exit;
+  F := GeoMapFile(IncludeTrailingPathDelimiter(MapVoteFolder), MapName);
+  if F <> '' then
+    FGeoResult := FGeo.Load(F);
+  BridgeGeoReady := Ord(FGeoResult > 0);
+  if FGeoResult <= 0 then
+    WriteServer(Format('[ZitroStats] map %s: the map file was not read (%d), the script casts the rays of Cover',
+      [MapName, FGeoResult]));
+end;
+
+{ the line between two points for a bullet of Team (0 = none): 1 blocked, 0 clear, -1 no map }
+function TZSEngine.GeoRay(X1, Y1, X2, Y2: Single; Team: LongInt): LongInt;
+begin
+  Result := -1;
+  if (FGeo = nil) or not FGeo.Loaded then
+    Exit;
+  if (Team < TEAM_ALPHA) or (Team > TEAM_DELTA) or not TeamGame then
+    Team := 0;
+  if FGeo.Ray(X1, Y1, X2, Y2, GR_BULLET, Team) then
+    Result := 1
+  else
+    Result := 0;
 end;
 
 procedure TZSEngine.EvWeapon(var E: TZSEvent);

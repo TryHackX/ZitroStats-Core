@@ -864,13 +864,58 @@ begin
       (B^.KitPickups[4] = 1) and (B^.KitPickups[5] = 1) and (B^.KitPickups[6] = 1) and (KitsPickedUp(B^) = 3) and
       (C^.KitPickups[1] = 1) and (KitsPickedUp(C^) = 1));
     Check('a cluster kit still tells the grenades apart', Engine.Live[1].ClusterNades and not Engine.Live[3].ClusterNades);
+    { [Bridges] (5.6): what the server's memory tells, set here for the export and taken back after it }
+    if A <> nil then
+    begin
+      A^.CollateralKills := 3;
+      A^.BackKills := 2;
+      A^.BackDeaths := 1;
+      A^.LongestHeadshotM := 87.5;
+      A^.LongestFlightKill := 1.5;
+      A^.LongestHitM := 80.5;
+      A^.HitDistSum := 100;
+      A^.HitDistCount := 4;
+      A^.HitAirTicks := 90;
+      A^.HitAirCount := 3;
+      A^.KillAirTicks := 60;
+      A^.KillAirCount := 2;
+      A^.StanceShots[0] := 10;
+      A^.StanceShots[1] := 20;
+      A^.StanceShots[3] := 5;
+      A^.StanceHits[0] := 4;
+      A^.StanceHits[1] := 5;
+      A^.StanceHits[3] := 1;
+    end;
     ExportText := PlayerJson(Engine, Engine.DB.IndexOfSteam('S1001'));
+    if A <> nil then
+    begin
+      A^.CollateralKills := 0;
+      A^.BackKills := 0;
+      A^.BackDeaths := 0;
+      A^.LongestHeadshotM := 0;
+      A^.LongestFlightKill := 0;
+      A^.LongestHitM := 0;
+      A^.HitDistSum := 0;
+      A^.HitDistCount := 0;
+      A^.HitAirTicks := 0;
+      A^.HitAirCount := 0;
+      A^.KillAirTicks := 0;
+      A^.KillAirCount := 0;
+      FillChar(A^.StanceShots, SizeOf(A^.StanceShots), 0);
+      FillChar(A^.StanceHits, SizeOf(A^.StanceHits), 0);
+    end;
   finally
     LeaveCriticalSection(Engine.StateLock);
   end;
   Check('players.json: the kits that healed, every kit picked up and each kind',
-    Pos('"heal_kits": 0, "kits": 4, "kit_pickups": {"medical": 2, "grenade": 0, "cluster": 1, "vest": 1, "berserker": 0, ' +
-      '"predator": 0, "flamer": 0}, "achievements": [', ExportText) > 0);
+    (Pos('"heal_kits": 0, "kits": 4, ', ExportText) > 0) and
+    (Pos('"kit_pickups": {"medical": 2, "grenade": 0, "cluster": 1, "vest": 1, "berserker": 0, ' +
+      '"predator": 0, "flamer": 0}, "achievements": [', ExportText) > 0));
+  Check('players.json: what the server''s memory and its bullets tell (5.6)',
+    Pos('"collateral_kills": 3, "back_kills": 2, "back_deaths": 1, "longest_headshot_m": 87.5, ' +
+      '"longest_bullet_flight_sec": 1.50, "longest_hit_m": 80.5, "avg_hit_dist_m": 25.0, "avg_hit_flight_sec": 0.50, ' +
+      '"avg_kill_flight_sec": 0.50, "stance_shots": [10, 20, 0, 5], "stance_hits": [4, 5, 0, 1], ' +
+      '"kit_pickups": {', ExportText) > 0);
   Check('!otherstats shows the kits picked up',
     Seen('Kits: Med 2, Nade 0, Cluster 1, Vest 1, Berserk 0, Predator 0, Flamer 0'));
   Check('!topby kits and medkits', Seen('Top by Kits > MedKits'));
@@ -885,6 +930,8 @@ begin
   end;
   Check('JSON export written with the 4.x keys', (Pos('"format": 2', ExportText) > 0) and (Pos('"name": "Alice"', ExportText) > 0) and
     (Pos('"longest_kill_px"', ExportText) > 0) and (Pos('"weapons"', ExportText) > 0));
+  Check('stats.json: the maps with the hits'' distance and air time (5.6)',
+    Pos('"avg_hit_flight_sec": 0.00, "avg_kill_flight_sec": 0.00, "last_played": ', ExportText) > 0);
   T0 := MonoMs;
   ExportText := '';
   while (MonoMs - T0 < 3000) and (Pos('/yes', ExportText) = 0) do

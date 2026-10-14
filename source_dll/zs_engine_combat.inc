@@ -1,5 +1,9 @@
 { zs_engine_combat.inc - kills, damage and flags (part of zs_engine) }
 
+const
+  { a bullet from behind flies at least this fast across (pixels a tick) towards the victim's back }
+  BACK_MIN_SPEED = 0.2;
+
 procedure TZSEngine.UpdateNemesis(var List: TNemesisArray; TargetId: LongInt);
 var
   i, j, Found: LongInt;
@@ -318,12 +322,22 @@ begin
   end
   else
   begin
-    if K = V then
-      KillSelf(V)
-    else if TeamGame and (Live[K].Team = Live[V].Team) then
-      KillTeammate(K, V, E.I[2])
-    else
-      KillEnemy(E);
+    try
+      if K = V then
+        KillSelf(V)
+      else if TeamGame and (Live[K].Team = Live[V].Team) then
+        KillTeammate(K, V, E.I[2])
+      else
+        KillEnemy(E);
+    except
+      on Ex: Exception do
+      begin
+        { the counters of the kill stopped half way; the death itself still ends the life, and the
+          round and the balance below still see it }
+        LiveLifeEnded(Live, V, GameTick);
+        ReportError('event ' + IntToStr(Ord(E.Kind)), Ex);
+      end;
+    end;
     CheckLastStand(V);
     RoundCheck(0);
   end;
@@ -430,11 +444,19 @@ begin
   LiveLifeEnded(Live, V, GameTick);
 end;
 
+{ a bullet that flies straight from where it was made to where it hits, so its air time is its flight:
+  not a blade or a fist (no flight at all), a flame (a cloud), nor a grenade or its clusters (a fuse) }
+function AirTimed(W: LongInt): Boolean;
+begin
+  Result := not IsMeleeWeapon(W) and (W <> WEP_FLAMER) and (W <> WEP_FRAG) and (W <> WEP_CLUSTERNADE) and
+    (W <> WEP_CLUSTER) and (W <> WEP_WORLD);
+end;
+
 procedure TZSEngine.KillEnemy(var E: TZSEvent);
 var
-  K, V, W, WS, VW, Flags, KIdx, VIdx, AIdx, Pts, Gain, Loss, A, M, D, TTK, Tk, Bucket, Lv: LongInt;
+  K, V, W, WS, VW, Flags, KIdx, VIdx, AIdx, Pts, Gain, Loss, A, M, D, TTK, Tk, Bucket, Lv, RayAns, Air: LongInt;
   KP, VP, AP: PPlayerProfile;
-  KX, KY, VX, VY, HX, HY, SX, SY, R, OwnX, OwnY, FoeX, FoeY: Single;
+  KX, KY, VX, VY, HX, HY, SX, SY, R, OwnX, OwnY, FoeX, FoeY, BackDX: Single;
   DistM, AssistDamage: Double;
   DistOk, Inactive, Headshot, Saved, SavedFlagger: Boolean;
   { [Matrix]: the killer's first bloods before this kill }
@@ -469,9 +491,26 @@ begin
   { no clear line to the victim when the kill landed: the shot went through cover (Map.RayCast).
     Until main.pas has settled which answer of RayCast means a clear line (EF_RAY_CAL), the answer
     says nothing, and no kill is Cover (live) - as Cover (shot) waits for it too (EvRay). }
-  if (Flags and EF_RAY_CAL <> 0) and (Flags and EF_LOS = 0) and not IsMeleeWeapon(W) and (W <> WEP_WORLD) and
-     (W <> WEP_NONE) then
-    Inc(KP^.WallKills);
+  if not IsMeleeWeapon(W) and (W <> WEP_WORLD) and (W <> WEP_NONE) then
+  begin
+    { [Bridges]: from the killer's eyes to the victim's head, chest and hips, on the map's walls -
+      covered when none of the three lines is clear }
+    RayAns := -1;
+    if Flags and EF_POINTS <> 0 then
+    begin
+      RayAns := GeoRay(E.F[9], E.F[10], E.F[11], E.F[12], Live[K].Team);
+      if RayAns = 1 then
+        RayAns := GeoRay(E.F[9], E.F[10], E.F[13], E.F[14], Live[K].Team);
+      if RayAns = 1 then
+        RayAns := GeoRay(E.F[9], E.F[10], E.F[15], E.F[16], Live[K].Team);
+      if RayAns >= 0 then
+        Inc(FGeoRays);
+    end;
+    if RayAns = 1 then
+      Inc(KP^.WallKills)
+    else if (RayAns < 0) and (Flags and EF_RAY_CAL <> 0) and (Flags and EF_LOS = 0) then
+      Inc(KP^.WallKills);
+  end;
   { near a flag base: defending the own one (victim close to it) or attacking the enemy's }
   if (M >= 0) and (M < DB.MapCount) and ((Match.GameStyle = GS_CTF) or (Match.GameStyle = GS_INF)) and
      ((Live[K].Team = TEAM_ALPHA) or (Live[K].Team = TEAM_BRAVO)) then
@@ -508,7 +547,24 @@ begin
     HX := VX;
     HY := VY;
   end;
-  if IsMeleeWeapon(W) or (W = WEP_M2) or (W = WEP_NONE) then
+  if IsMeleeWeapon(W) or (W = WEP_NONE) then
+  begin
+    SX := KX;
+    SY := KY;
+    DistOk := True;
+  end
+  { [Bridges]: where the lethal bullet was made (its Initial), as the server's own kill message
+    measures it - for every weapon and every shooter }
+  else if Flags and EF_ORIGIN <> 0 then
+  begin
+    SX := E.F[7];
+    SY := E.F[8];
+    { a script's bullet made right at the victim says nothing about the distance: Basic-Extended
+      finishes a bleeding or downed player with one made 8 px above him. One made far away (its
+      Javelin, from the launcher) is measured. }
+    DistOk := (Flags and EF_SCRIPT_BULLET = 0) or (Hypot(HX - SX, HY - SY) >= 2 * PIXELS_PER_METER);
+  end
+  else if W = WEP_M2 then
   begin
     SX := KX;
     SY := KY;
@@ -526,7 +582,24 @@ begin
   { the same line the distance is measured on: from where the lethal shot was fired to where it hit.
     Only the script sees the walls, so it is asked and the answer arrives a tick later. }
   if DistOk and not IsMeleeWeapon(W) and (W <> WEP_NONE) and (W <> WEP_WORLD) then
-    AskRay(KP^.ID, SX, SY, HX, HY);
+  begin
+    { [Bridges]: the engine has the map's walls and answers at once }
+    RayAns := GeoRay(SX, SY, HX, HY, Live[K].Team);
+    if RayAns >= 0 then
+    begin
+      Inc(FGeoRays);
+      if RayAns = 1 then
+      begin
+        Inc(KP^.CoverShotKills);
+        MxCoverShot(Self, KIdx);
+      end;
+      if Cfg.DebugRayCast then
+        NotifyAdmins(Format('[debug] %s: the line from the shot to the hit is %s (the map in the library)',
+          [KP^.ActiveName, BoolToStr(RayAns = 1, 'blocked, counted as Cover (shot)', 'clear')]), CLR_HINT);
+    end
+    else
+      AskRay(KP^.ID, SX, SY, HX, HY);
+  end;
 
   { points; InactiveVictimSeconds = 0 switches the inactive victim rule off (with 0 every victim
     would be inactive and every further kill of the same one worth less for the whole map) }
@@ -592,6 +665,58 @@ begin
     end;
   end;
 
+  { [Bridges]: a second victim of one bullet (its slot, the tick it was fired and where - a slot is
+    soon taken by another bullet); not for a blast, a flame or a blade (one grenade killing two is
+    ExplosionMultiKills) }
+  if (Flags and EF_ORIGIN <> 0) and (Flags and EF_SCRIPT_BULLET = 0) and not IsMeleeWeapon(W) and
+     not IsExplosiveWeapon(W) and (W <> WEP_FLAMER) then
+  begin
+    if (Live[K].LastKillBullet = E.I[0]) and (Live[K].LastKillOrigin = E.I[4]) and
+       (Live[K].LastKillOX = E.F[7]) and (Live[K].LastKillOY = E.F[8]) then
+    begin
+      Inc(KP^.CollateralKills);
+      HudEvent(K, 'Collateral!');
+    end;
+    Live[K].LastKillBullet := E.I[0];
+    Live[K].LastKillOrigin := E.I[4];
+    Live[K].LastKillOX := E.F[7];
+    Live[K].LastKillOY := E.F[8];
+  end;
+  { killed from behind: the lethal bullet flew the way the victim faced (his Direction), so it came
+    at his back; not a blast, a flame, or a shot from (nearly) straight above or below }
+  if (Flags and EF_MEMORY <> 0) and ((E.I[5] = 1) or (E.I[5] = -1)) and not IsExplosiveWeapon(W) and
+     (W <> WEP_FLAMER) and (W <> WEP_WORLD) then
+  begin
+    BackDX := E.F[17];
+    if (Abs(BackDX) > BACK_MIN_SPEED) and (Abs(BackDX) >= 0.5 * Abs(E.F[18])) and ((BackDX > 0) = (E.I[5] > 0)) then
+    begin
+      Inc(KP^.BackKills);
+      Inc(VP^.BackDeaths);
+    end;
+  end;
+  { the longest kill with a hit in the head: only when the server's own hit test named the head }
+  if Headshot and DistOk and Live[K].Pair[V].LastZoneExact and (DistM > KP^.LongestHeadshotM) then
+    KP^.LongestHeadshotM := DistM;
+  { the flight of a lethal bullet fired straight at the victim - not a grenade (its time is a fuse),
+    a flame, a blade, nor a script's bullet: the longest, and the ticks added up for the average (of
+    the account and of the weapon) }
+  Air := -1;
+  if (Flags and EF_ORIGIN <> 0) and (Flags and EF_SCRIPT_BULLET = 0) and AirTimed(W) and (Tk >= E.I[4]) and
+     (Tk - E.I[4] <= MAX_FLIGHT_TICKS) then
+  begin
+    Air := Tk - E.I[4];
+    if Air / TICKS_PER_SECOND > KP^.LongestFlightKill then
+      KP^.LongestFlightKill := Air / TICKS_PER_SECOND;
+    Inc(KP^.KillAirTicks, Air);
+    Inc(KP^.KillAirCount);
+    if WS >= 0 then
+    begin
+      Inc(KP^.Weapons[WS].KillAirTicks, Air);
+      Inc(KP^.Weapons[WS].KillAirCount);
+      MxKillAir(Self, KIdx, WS, Air);
+    end;
+  end;
+
   if WS >= 0 then
   begin
     if DistOk then
@@ -630,6 +755,12 @@ begin
     Inc(DB.Maps[M].Kills);
     if WS >= 0 then
       Inc(DB.Maps[M].WeaponKills[WS]);
+    { [Bridges] (5.6): the flight of the lethal bullet, as the killer's }
+    if Air >= 0 then
+    begin
+      Inc(DB.Maps[M].KillAirTicks, Air);
+      Inc(DB.Maps[M].KillAirCount);
+    end;
     HeatAdd(M, KX, KY, True);
     HeatAdd(M, VX, VY, False);
     MxMapKill(Self, M, K, WS, VW);
@@ -1029,6 +1160,77 @@ begin
   end;
 end;
 
+{ [Bridges] (5.6): a hit on an enemy with a bullet whose origin the server's memory told (and the hook saw
+  made): the metres from there to the hit - as the kill distance, the number of the server's own kill
+  message - and the ticks it flew, for the account at SIdx and its weapon, the map, and the player's
+  record of the map (its sums follow the account's). A blade or a fist has no distance; a flame or a
+  grenade no air time. }
+procedure CountHitFlight(Eng: TZSEngine; SIdx, WS, W: LongInt; const E: TZSEvent);
+var
+  HX, HY: Single;
+  HitM: Double;
+  Air, M: LongInt;
+  SP: PPlayerProfile;
+begin
+  if IsMeleeWeapon(W) or (W = WEP_WORLD) then
+    Exit;
+  if E.I[2] and EF_BULLET <> 0 then
+  begin
+    HX := E.F[2];
+    HY := E.F[3];
+  end
+  else
+  begin
+    HX := E.F[6];
+    HY := E.F[7];
+  end;
+  HitM := Hypot(HX - E.F[13], HY - E.F[14]) / PIXELS_PER_METER;
+  if IsNan(HitM) or IsInfinite(HitM) then
+    Exit;
+  if AirTimed(W) and (Eng.GameTick >= E.I[4]) and (Eng.GameTick - E.I[4] <= MAX_FLIGHT_TICKS) then
+    Air := Eng.GameTick - E.I[4]
+  else
+    Air := -1;
+  SP := Eng.DB.Profiles[SIdx];
+  SP^.HitDistSum := SP^.HitDistSum + HitM;
+  Inc(SP^.HitDistCount);
+  if HitM > SP^.LongestHitM then
+    SP^.LongestHitM := HitM;
+  if Air >= 0 then
+  begin
+    Inc(SP^.HitAirTicks, Air);
+    Inc(SP^.HitAirCount);
+  end;
+  if WS >= 0 then
+  begin
+    SP^.Weapons[WS].HitDistSum := SP^.Weapons[WS].HitDistSum + HitM;
+    Inc(SP^.Weapons[WS].HitDistCount);
+    if HitM > SP^.Weapons[WS].LongestHit then
+      SP^.Weapons[WS].LongestHit := HitM;
+    if Air >= 0 then
+    begin
+      Inc(SP^.Weapons[WS].HitAirTicks, Air);
+      Inc(SP^.Weapons[WS].HitAirCount);
+    end;
+  end;
+  { the map's own counters: how far the hits here flew }
+  M := Eng.Match.MapIndex;
+  if (M >= 0) and (M < Eng.DB.MapCount) then
+  begin
+    Eng.DB.Maps[M].HitDistSum := Eng.DB.Maps[M].HitDistSum + HitM;
+    Inc(Eng.DB.Maps[M].HitDistCount);
+    if HitM > Eng.DB.Maps[M].LongestHit then
+      Eng.DB.Maps[M].LongestHit := HitM;
+    if Air >= 0 then
+    begin
+      Inc(Eng.DB.Maps[M].HitAirTicks, Air);
+      Inc(Eng.DB.Maps[M].HitAirCount);
+    end;
+    Eng.DB.TouchMap(M);
+  end;
+  MxHitFlight(Eng, SIdx, WS, HitM, Air);
+end;
+
 procedure TZSEngine.EvDamage(var E: TZSEvent);
 var
   { [Matrix]: the counters of the shooter and of the victim before this hit }
@@ -1036,7 +1238,7 @@ var
   S, V, W, WS, Flags, Zone, Posture, SIdx, VIdx: LongInt;
   Dmg, Speed, Cap: Single;
   DX, DY: Double;
-  IsSelf, Friendly, Vest, Berserk: Boolean;
+  IsSelf, Friendly, Vest, Berserk, ShotHit: Boolean;
   SP, VP: PPlayerProfile;
 begin
   S := E.Slot;
@@ -1081,6 +1283,19 @@ begin
     else
       Zone := HitModelClassify(DB.Server.HitModel[Posture], DX, DY, HIT_MODEL_MIN_SAMPLES);
   end;
+  { [Bridges]: the zone the bullet hit on the victim's skeleton, as the server tests it - exact for
+    every weapon; the zone the damage tells is compared with it (/zs_perf) }
+  if (Flags and EF_ZONE <> 0) and ZoneClassifiableStyle(W) and (E.I[3] >= HZ_HEAD) and (E.I[3] <= HZ_LEGS) then
+  begin
+    if WeaponHasDistinctZones(W) and (Zone >= HZ_HEAD) and (Zone <= HZ_LEGS) then
+    begin
+      if Zone = E.I[3] then
+        Inc(FZoneSame)
+      else
+        Inc(FZoneDiff);
+    end;
+    Zone := E.I[3];
+  end;
 
   { A hit takes at most the health the victim still had: a Barrett or a grenade on a wounded
     player counts only what was left. The zone above still used the raw damage. }
@@ -1100,6 +1315,7 @@ begin
       Live[S].Pair[V].FirstDamageTick := GameTick;
     Live[S].Pair[V].LastDamageTick := GameTick;
     Live[S].Pair[V].LastZone := Zone;
+    Live[S].Pair[V].LastZoneExact := Flags and EF_ZONE <> 0;
     if Flags and EF_BULLET <> 0 then
     begin
       Live[S].Pair[V].LastBVX := E.F[4];
@@ -1167,11 +1383,20 @@ begin
       Match.FirstDamage := True;
       Inc(SP^.FirstDamageCount);
     end;
-    if CountsForAccuracy(W) then
+    { [Bridges]: a bullet the hook did not see made is a script's (a mine, a guided rocket, an
+      extra shot of another script): its damage is the player's, but no shot of his went with it,
+      so it is no hit of his accuracy and no hit of a zone }
+    ShotHit := Flags and EF_SCRIPT_BULLET = 0;
+    if CountsForAccuracy(W) and ShotHit then
+    begin
       Inc(SP^.ShotsHits);
+      { the accuracy by stance: how the shooter stood when he fired (the hook's shots) }
+      if FBrHook and (E.I[5] >= POSTURE_STAND) and (E.I[5] <= POSTURE_AIR) and (Flags and EF_MEMORY <> 0) then
+        Inc(SP^.StanceHits[E.I[5]]);
+    end;
     { zones only exist for bullets; an explosion, a flame or a blade has none, so it is not an
       "unclear" hit either }
-    if ZoneClassifiableStyle(W) then
+    if ZoneClassifiableStyle(W) and ShotHit then
       case Zone of
         HZ_HEAD:
           begin
@@ -1184,24 +1409,30 @@ begin
       end;
     if WS >= 0 then
     begin
-      Inc(SP^.Weapons[WS].Hits);
-      if ZoneClassifiableStyle(W) then
-        case Zone of
-          HZ_HEAD: Inc(SP^.Weapons[WS].Headshots);
-          HZ_BODY: Inc(SP^.Weapons[WS].HitsBody);
-          HZ_LEGS: Inc(SP^.Weapons[WS].HitsLegs);
-          else Inc(SP^.Weapons[WS].HitsUnknown);
-        end;
+      if ShotHit then
+      begin
+        Inc(SP^.Weapons[WS].Hits);
+        if ZoneClassifiableStyle(W) then
+          case Zone of
+            HZ_HEAD: Inc(SP^.Weapons[WS].Headshots);
+            HZ_BODY: Inc(SP^.Weapons[WS].HitsBody);
+            HZ_LEGS: Inc(SP^.Weapons[WS].HitsLegs);
+            else Inc(SP^.Weapons[WS].HitsUnknown);
+          end;
+      end;
       SP^.Weapons[WS].Damage := SP^.Weapons[WS].Damage + Dmg;
       if VP <> nil then
         VP^.Weapons[WS].DamageReceived := VP^.Weapons[WS].DamageReceived + Dmg;
     end;
+    { [Bridges]: how far the hit flew and for how long, from where and when its bullet was made }
+    if ShotHit and (Flags and EF_ORIGIN <> 0) then
+      CountHitFlight(Self, SIdx, WS, W, E);
     if VP <> nil then
     begin
       VP^.DamageReceived := VP^.DamageReceived + Dmg;
       DB.Touch(VIdx);
     end;
-    MxDamage(Self, SIdx, VIdx, W, Dmg, Zone);
+    MxDamage(Self, SIdx, VIdx, W, Dmg, Zone, ShotHit);
   end;
   CountHurt(S, V, W, IsSelf, Friendly, SIdx, VIdx);
   MxFollow(Self, MxS);

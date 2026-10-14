@@ -56,12 +56,18 @@ type
     FWake: PRTLEvent;
     FJobs: array of TServiceJob;
     FJobCount: LongInt;
+    { the password hashes wait apart and go first: a player waits for them, a mail may take
+      TimeoutSeconds }
+    FHashJobs: array of TServiceJob;
+    FHashCount: LongInt;
     FResults: array of TServiceResult;
     FResultCount: LongInt;
     FMail: TMailSettings;
     FPendingHashes: LongInt;
     FAbort: Boolean;
     procedure Post(const R: TServiceResult);
+    procedure RunJob(var Job: TServiceJob; var Stop: Boolean);
+    procedure RunHashes(var Stop: Boolean);
     procedure DoHash(var Job: TServiceJob);
     procedure DoMail(const Job: TServiceJob);
     procedure DoHttpPost(const Job: TServiceJob);
@@ -389,12 +395,21 @@ begin
     Result := not ((Job.Kind = svHash) and (FPendingHashes >= MaxPendingHashes));
     if not Result then
       Exit;
-    if FJobCount >= Length(FJobs) then
-      SetLength(FJobs, Length(FJobs) * 2 + 8);
-    FJobs[FJobCount] := Job;
-    Inc(FJobCount);
     if Job.Kind = svHash then
+    begin
+      if FHashCount >= Length(FHashJobs) then
+        SetLength(FHashJobs, Length(FHashJobs) * 2 + 8);
+      FHashJobs[FHashCount] := Job;
+      Inc(FHashCount);
       Inc(FPendingHashes);
+    end
+    else
+    begin
+      if FJobCount >= Length(FJobs) then
+        SetLength(FJobs, Length(FJobs) * 2 + 8);
+      FJobs[FJobCount] := Job;
+      Inc(FJobCount);
+    end;
   finally
     LeaveCriticalSection(FLock);
   end;
@@ -671,12 +686,61 @@ begin
   Post(R);
 end;
 
-procedure TServiceThread.Execute;
+procedure TServiceThread.RunJob(var Job: TServiceJob; var Stop: Boolean);
+var
+  R: TServiceResult;
+begin
+  try
+    case Job.Kind of
+      svHash: DoHash(Job);
+      svMail:
+        if not FAbort then
+          DoMail(Job);
+      svHttpPost:
+        if not FAbort then
+          DoHttpPost(Job);
+      svStop: Stop := True;
+    end;
+  except
+    on E: Exception do
+    begin
+      if Job.Kind = svHash then
+      begin
+        EnterCriticalSection(FLock);
+        Dec(FPendingHashes);
+        LeaveCriticalSection(FLock);
+        { the player waits for this answer: without it the account stays busy for the session }
+        R := ResultFor(Job);
+        R.Ok := False;
+        Post(R);
+      end;
+      WipeString(Job.Password);
+      WipeString(Job.Password2);
+    end;
+  end;
+end;
+
+{ every password hash waiting now }
+procedure TServiceThread.RunHashes(var Stop: Boolean);
 var
   Batch: array of TServiceJob;
   Count, i: LongInt;
+begin
+  EnterCriticalSection(FLock);
+  Batch := FHashJobs;
+  Count := FHashCount;
+  FHashJobs := nil;
+  FHashCount := 0;
+  LeaveCriticalSection(FLock);
+  for i := 0 to Count - 1 do
+    RunJob(Batch[i], Stop);
+end;
+
+procedure TServiceThread.Execute;
+var
+  Batch: array of TServiceJob;
+  Count, i, Hashes: LongInt;
   Stop: Boolean;
-  R: TServiceResult;
 begin
   GuardWorkerThread;
   CrashThread(CT_SERVICE);
@@ -687,44 +751,21 @@ begin
     Count := FJobCount;
     FJobs := nil;
     FJobCount := 0;
+    Hashes := FHashCount;
     LeaveCriticalSection(FLock);
-    if Count = 0 then
+    if (Count = 0) and (Hashes = 0) then
     begin
       if Terminated then
         Break;
       RTLEventWaitFor(FWake, 500);
       Continue;
     end;
+    { the hashes first, and those that come meanwhile before the next mail or webhook }
+    RunHashes(Stop);
     for i := 0 to Count - 1 do
     begin
-      try
-        case Batch[i].Kind of
-          svHash: DoHash(Batch[i]);
-          svMail:
-            if not FAbort then
-              DoMail(Batch[i]);
-          svHttpPost:
-            if not FAbort then
-              DoHttpPost(Batch[i]);
-          svStop: Stop := True;
-        end;
-      except
-        on E: Exception do
-        begin
-          if Batch[i].Kind = svHash then
-          begin
-            EnterCriticalSection(FLock);
-            Dec(FPendingHashes);
-            LeaveCriticalSection(FLock);
-            { the player waits for this answer: without it the account stays busy for the session }
-            R := ResultFor(Batch[i]);
-            R.Ok := False;
-            Post(R);
-          end;
-          WipeString(Batch[i].Password);
-          WipeString(Batch[i].Password2);
-        end;
-      end;
+      RunHashes(Stop);
+      RunJob(Batch[i], Stop);
     end;
     Batch := nil;
   until Stop;

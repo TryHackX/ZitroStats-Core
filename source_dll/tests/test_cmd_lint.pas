@@ -13,6 +13,8 @@ uses
 
 const
   LONG_NAME = 'LongNameLongNameLongName';
+  { a folder name for the maps folder of /zs_maps (nothing is made in it) }
+  LONG_DIR = 'a_long_throwaway_folder_of_the_lint_test_that_is_never_made_anywhere_on_the_disk_at_all';
 
 type
   TMode = record
@@ -33,7 +35,7 @@ const
     (Name: 'CTF survival'; Map: 'ctf_lint2'; Style: GS_CTF; Flags: 1 or 2));
 
   { every command of the help, the aliases, the arguments of each form }
-  PLAYER_CMDS: array[0..202] of AnsiString = (
+  PLAYER_CMDS: array[0..205] of AnsiString = (
     '!zitro', '!help', '!contact', '!hud',
     '!stats', '!stats alice', '!stats eve', '!stats bob', '!stats nobodyhere', '!stats ' + LONG_NAME, '!stats #1',
     '!statsi 1', '!statsi 999', '!statsi abc',
@@ -53,6 +55,8 @@ const
     '!topweapons zzzz', '!spree eve', '!allweaponsby kills alice', '!allweaponsby acc;kd eve', '!allweaponsby help',
     '!allweaponsbyi reloads 1', '!serverweaponsby kills', '!serverweaponsby help', '!weaponsby dmg bob', '!topby kits',
     '!topby healkits;medkits;nadekits', '!topby roundfirstblood;firstblood',
+    '!topby collaterals;backkills;backdeaths', '!topby longesths;longestair',
+    '!topby accstand;acccrouch;accprone;accair',
     { the per-map views ([Matrix]): Eve has a record of a deathmatch player on the first map }
     '!mapplayerstats', '!mapplayerstats eve', '!mapplayerstats rscs eve', '!mapplayerstats rscs alice',
     '!mapplayerstats nobodyhere', '!mapplayerotherstats eve', '!mapplayerotherstats rscs eve',
@@ -828,6 +832,40 @@ begin
     RunAll;
     Check('no violations in ' + ModeName + ' (' + IntToStr(Violations) + ' so far)', True);
   end;
+
+  { /zs_maps names the maps folder from the server folder (the current one, Root), so the lines do not
+    depend on where the test runs; a long folder in it, and one elsewhere, by their last folders }
+  EnterCriticalSection(Engine.StateLock);
+  try
+    Engine.Cfg.MapVoteMapsFolder := Root + PathDelim + LONG_DIR + PathDelim + LONG_DIR + PathDelim + 'maps';
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  Run(0, '/zs_maps', True);
+  Lint('console /zs_maps (a long folder in the server folder)', 0, False);
+  Check('/zs_maps: a long maps folder in the server folder by its last folders, within LINE_W',
+    (Lines.Count > 0) and (Pos('[Maps] folder: ...' + PathDelim, Lines[0]) = 1) and (Length(Lines[0]) <= LINE_W) and
+    (Pos(PathDelim + 'maps', Lines[0]) > 0) and (Pos(Root, Lines[0]) = 0));
+  EnterCriticalSection(Engine.StateLock);
+  try
+    Engine.Cfg.MapVoteMapsFolder := ExtractFileDir(Root) + PathDelim + LONG_DIR + PathDelim + 'maps';
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  Run(0, '/zs_maps', True);
+  Lint('console /zs_maps (a long folder elsewhere)', 0, False);
+  Check('/zs_maps: a maps folder outside the server folder without the start of its path, within LINE_W',
+    (Lines.Count > 0) and (Pos('[Maps] folder: ...' + PathDelim, Lines[0]) = 1) and (Length(Lines[0]) <= LINE_W) and
+    (Pos(ExtractFileDir(Root), Lines[0]) = 0));
+  EnterCriticalSection(Engine.StateLock);
+  try
+    Engine.Cfg.MapVoteMapsFolder := Root + PathDelim + 'maps';
+  finally
+    LeaveCriticalSection(Engine.StateLock);
+  end;
+  Run(0, '/zs_maps', True);
+  Check('/zs_maps: the maps folder of the test is "maps", whatever folder the test runs in',
+    (Lines.Count > 0) and (Lines[0] = '[Maps] folder: maps'));
 
   Check(Format('no violations (%d found)', [Violations]), Violations = 0);
   Engine.Free;

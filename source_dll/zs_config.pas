@@ -232,6 +232,7 @@ type
     TrustDeviceSameIP: Boolean;
     LoginMaxAttempts: LongInt;
     LoginLockMinutes: LongInt;
+    LoginMaxAttemptsAccount: LongInt; { wrong passwords from every source together that lock the account }
     UnauthenticatedAction: AnsiString; { none | spectator | kick }
     LoginGraceSeconds: LongInt;
     LoginReturnToGame: Boolean;      { after a login put a player we sent to the spectators back }
@@ -254,6 +255,8 @@ type
     MailCodeMinutes: LongInt;
     MailMinIntervalMinutes: LongInt;
     MailMaxPerDay: LongInt;
+    MailMaxPerDayServer: LongInt;   { e-mails the server sends a day, all accounts together }
+    MailMaxPerDaySource: LongInt;   { e-mails asked for a day from one computer or one network }
     MailTimeoutSeconds: LongInt;
     MailServerName: AnsiString;
 
@@ -296,7 +299,9 @@ type
 
     { commands }
     HeavyCooldownSeconds: LongInt;
+    SearchCooldownSeconds: LongInt;   { a name searched in every account, a page of a heavy list }
     CommandsPerSecond: LongInt;
+    MinSamplePercent: LongInt;        { the least count a share or an average needs in the lists, in % of the built-in }
 
     { [LastFight]: !lastfight and the lines after a death (zs_fight, zs_engine_fight.inc) }
     LastFightEnabled: Boolean;
@@ -390,6 +395,7 @@ type
     { [Matrix]: the player-on-map records (zs_matrix) and the weapon matchups of the maps }
     MatrixEnabled: Boolean;            { off: none of it is recorded }
     MatrixPruneDays: LongInt;          { the records of accounts not seen for this many days go; 0 = never }
+    MatrixMapPruneDays: LongInt;       { also a map not played / a rival not met for this many days; 0 = never }
     MatrixPlayerHeatmap: Boolean;      { the heat cells of every player on every map }
     MatrixMaxRivals: LongInt;          { rivals one record keeps at most }
 
@@ -398,6 +404,7 @@ type
     MapVotePercent: LongInt;           { of the players who may vote (MvEligible) }
     MapVoteSeconds: LongInt;
     MapVoteStarterCooldown: LongInt;   { seconds before the starter of a vote may start another }
+    MapVoteGapSeconds: LongInt;        { seconds after a vote before the next one, whoever starts it }
     MapVoteMinTimeLeft: LongInt;       { seconds of the map a new vote needs }
     MapVoteBlockAfterChange: LongInt;  { seconds after a map change without new votes }
     MapVoteMinPlayers: LongInt;
@@ -411,6 +418,11 @@ type
 
     { debug }
     DebugRayCast: Boolean;
+
+    { [Bridges]: the library reads the running server (5.6) }
+    BridgeHook: Boolean;               { a hook in the server's CreateBullet reports every bullet }
+    BridgeMemory: Boolean;             { the soldiers and bullets are read from the server's memory }
+    BridgeGeometry: Boolean;           { the map file in the library: the rays of Cover (live) / (shot) }
 
     { tiers }
     RankTiers: array[0..MAX_TIERS - 1] of TRankTier;
@@ -733,6 +745,7 @@ begin
   C.TrustDeviceSameIP := True;
   C.LoginMaxAttempts := 5;
   C.LoginLockMinutes := 15;
+  C.LoginMaxAttemptsAccount := 20;
   C.UnauthenticatedAction := 'none';
   C.LoginGraceSeconds := 60;
   C.LoginReturnToGame := True;
@@ -754,6 +767,8 @@ begin
   C.MailCodeMinutes := 15;
   C.MailMinIntervalMinutes := 10;
   C.MailMaxPerDay := 3;
+  C.MailMaxPerDayServer := 50;
+  C.MailMaxPerDaySource := 5;
   C.MailTimeoutSeconds := 30;
   C.MailServerName := 'Soldat server';
 
@@ -790,7 +805,9 @@ begin
   C.SpreeBigY := 130;
 
   C.HeavyCooldownSeconds := 5;
+  C.SearchCooldownSeconds := 2;
   C.CommandsPerSecond := 2;
+  C.MinSamplePercent := 100;
 
   C.LastFightEnabled := True;
   C.LastFightSummary := True;
@@ -871,6 +888,7 @@ begin
 
   C.MatrixEnabled := True;
   C.MatrixPruneDays := 90;
+  C.MatrixMapPruneDays := 0;
   C.MatrixPlayerHeatmap := True;
   C.MatrixMaxRivals := 200;
 
@@ -878,6 +896,7 @@ begin
   C.MapVotePercent := 60;
   C.MapVoteSeconds := 20;
   C.MapVoteStarterCooldown := 45;
+  C.MapVoteGapSeconds := 60;
   C.MapVoteMinTimeLeft := 26;
   C.MapVoteBlockAfterChange := 20;
   C.MapVoteMinPlayers := 1;
@@ -892,6 +911,9 @@ begin
   C.LeaguesEnabled := False;
   C.LeagueSource := 'mmr';
   C.DebugRayCast := False;
+  C.BridgeHook := True;
+  C.BridgeMemory := True;
+  C.BridgeGeometry := True;
   C.LeagueDivisions := 5;
   C.LeaguePlacementMatches := 10;
   C.LeaguePercents := '2,8,20,40,65,85';
@@ -1406,6 +1428,13 @@ begin
         if Key = 'raycastlog' then C.DebugRayCast := BoolVal
         else Unknown;
       end
+      else if Section = 'bridges' then
+      begin
+        if Key = 'serverhook' then C.BridgeHook := BoolVal
+        else if Key = 'memoryreads' then C.BridgeMemory := BoolVal
+        else if Key = 'mapgeometry' then C.BridgeGeometry := BoolVal
+        else Unknown;
+      end
       else if Section = 'mmr' then
       begin
         if Key = 'start' then C.MmrStart := FltVal(1500, 100, 10000)
@@ -1481,6 +1510,7 @@ begin
       begin
         if Key = 'enabled' then C.MatrixEnabled := BoolVal
         else if Key = 'matrixprunedays' then C.MatrixPruneDays := IntVal(90, 0, 3650)
+        else if Key = 'matrixmapprunedays' then C.MatrixMapPruneDays := IntVal(0, 0, 3650)
         else if Key = 'playerheatmap' then C.MatrixPlayerHeatmap := BoolVal
         else if Key = 'maxrivals' then C.MatrixMaxRivals := IntVal(200, 1, 10000)
         else Unknown;
@@ -1491,6 +1521,7 @@ begin
         else if Key = 'votepercent' then C.MapVotePercent := IntVal(60, 1, 100)
         else if Key = 'voteseconds' then C.MapVoteSeconds := IntVal(20, 5, 120)
         else if Key = 'startercooldownseconds' then C.MapVoteStarterCooldown := IntVal(45, 0, 3600)
+        else if Key = 'gapseconds' then C.MapVoteGapSeconds := IntVal(60, 0, 3600)
         else if Key = 'mintimeleftseconds' then C.MapVoteMinTimeLeft := IntVal(26, 0, 3600)
         else if Key = 'blockafterchangeseconds' then C.MapVoteBlockAfterChange := IntVal(20, 0, 600)
         else if Key = 'minplayers' then C.MapVoteMinPlayers := IntVal(1, 1, 32)
@@ -1674,6 +1705,7 @@ begin
         else if Key = 'trustdevicesameip' then C.TrustDeviceSameIP := BoolVal
         else if Key = 'loginmaxattempts' then C.LoginMaxAttempts := IntVal(5, 1, 100)
         else if Key = 'loginlockminutes' then C.LoginLockMinutes := IntVal(15, 1, 10080)
+        else if Key = 'loginmaxattemptsaccount' then C.LoginMaxAttemptsAccount := IntVal(20, 1, 1000)
         else if Key = 'unauthenticatedaction' then C.UnauthenticatedAction := OneOf('none', ['none', 'spectator', 'kick'])
         else if Key = 'logingraceseconds' then C.LoginGraceSeconds := IntVal(60, 0, 3600)
         else if Key = 'loginreturntogame' then C.LoginReturnToGame := BoolVal
@@ -1699,6 +1731,8 @@ begin
         else if Key = 'codelifetimeminutes' then C.MailCodeMinutes := IntVal(15, 1, 1440)
         else if Key = 'minintervalminutes' then C.MailMinIntervalMinutes := IntVal(10, 0, 1440)
         else if Key = 'maxperday' then C.MailMaxPerDay := IntVal(3, 1, 100)
+        else if Key = 'maxperdayserver' then C.MailMaxPerDayServer := IntVal(50, 1, 100000)
+        else if Key = 'maxperdaysource' then C.MailMaxPerDaySource := IntVal(5, 1, 1000)
         else if Key = 'timeoutseconds' then C.MailTimeoutSeconds := IntVal(30, 5, 300)
         else if Key = 'servername' then C.MailServerName := SanitizeText(Val, 60)
         else Unknown;
@@ -1751,7 +1785,9 @@ begin
       else if Section = 'commands' then
       begin
         if Key = 'heavycooldownseconds' then C.HeavyCooldownSeconds := IntVal(5, 0, 600)
+        else if Key = 'searchcooldownseconds' then C.SearchCooldownSeconds := IntVal(2, 0, 60)
         else if Key = 'commandspersecond' then C.CommandsPerSecond := IntVal(2, 1, 50)
+        else if Key = 'minsamplepercent' then C.MinSamplePercent := IntVal(100, 0, 1000)
         else Unknown;
       end
       else if Section = 'lastfight' then

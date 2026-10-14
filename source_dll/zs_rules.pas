@@ -662,9 +662,10 @@ begin
     end;
   end;
 
-  { [Matrix]: the records of every map of accounts that have not played for MatrixPruneDays go }
-  if Cfg.MatrixPruneDays > 0 then
-    Rep.MatrixPruned := DB.PrunePlayerMaps(Cfg.MatrixPruneDays);
+  { [Matrix]: the records of every map of accounts that have not played for MatrixPruneDays go; with
+    MatrixMapPruneDays also the maps an account left and the rivals it no longer meets }
+  if (Cfg.MatrixPruneDays > 0) or (Cfg.MatrixMapPruneDays > 0) then
+    Rep.MatrixPruned := DB.PrunePlayerMaps(Cfg.MatrixPruneDays, Cfg.MatrixMapPruneDays);
 end;
 
 { ---------------- leagues ---------------- }

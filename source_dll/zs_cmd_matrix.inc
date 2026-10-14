@@ -36,6 +36,10 @@ const
   { !mapweapstats: weapon, kills, share of the kills, share of the picks of its group, shots, hits,
     Acc%, HS%, damage and players; the time ends the line - at most 90 of LINE_W }
   PM_MAP_WEAPON_COLS: array[0..10] of LongInt = (17, 7, 7, 7, 7, 7, 7, 7, 8, 8, 9);
+  { the range of the weapons of a map (!mapweapstats, !mapplayerweapstats): weapon, the longest hit, the
+    average distance and air time of the hits, the air time of the kills (the names of the metrics); the
+    hits measured end the line - at most 75 of LINE_W }
+  PM_RANGE_COLS: array[0..5] of LongInt = (17, 10, 10, 10, 10, 10);
   { the players with the most kills with one weapon on a map (!mapwep): place, nick, kills, deaths,
     K/D, Acc%, HS%, damage; the time ends the line - at most 92 of LINE_W }
   PM_WEAPON_PLAYER_COLS: array[0..8] of LongInt = (5, 22, 8, 8, 8, 8, 7, 8, 10);
@@ -87,6 +91,10 @@ const
   WPS_DMG = 6;
   WPS_TIME = 7;
   WPS_PLAYERS = 8;
+  WPS_HITDIST = 9;
+  WPS_LONGHIT = 10;
+  WPS_HITAIR = 11;
+  WPS_KILLAIR = 12;
 
   { what the rivals of a record are picked by (TopRivalsText) }
   TRV_VICTIMS = 0;
@@ -141,11 +149,16 @@ type
     RKills, Deaths, Shots, Hits, Headshots, Time: Int64;
     Damage: Double;
     Players: LongInt;      { accounts that used it there }
+    { [Bridges] (5.6): its hits and kills there measured from their bullet's origin }
+    HitDistSum: Double;
+    HitDistCount: Int64;
+    LongestHit: Single;
+    HitAirTicks, HitAirCount, KillAirTicks, KillAirCount: Int64;
   end;
   TMapWeaponArray = array[0..WSLOT_COUNT - 1] of TMapWeapon;
 
 const
-  MX_FLAGS: array[0..34] of TMxFlag = (
+  MX_FLAGS: array[0..38] of TMxFlag = (
     (Kind: MXF_RIVALS; Words: ' fights fight '; Head: 'fights'; Help: 'kills both ways; the default'),
     (Kind: MXF_RIVALS; Words: ' kills kill '; Head: 'kills'; Help: 'the player killed the rival'),
     (Kind: MXF_RIVALS; Words: ' deaths death '; Head: 'deaths'; Help: 'the rival killed the player'),
@@ -180,7 +193,11 @@ const
     (Kind: MXF_WEAPONS; Words: ' hs headshots '; Head: 'headshot share'; Help: 'HS%'),
     (Kind: MXF_WEAPONS; Words: ' dmg damage '; Head: 'damage'; Help: ''),
     (Kind: MXF_WEAPONS; Words: ' time usage '; Head: 'time'; Help: 'time in hand'),
-    (Kind: MXF_WEAPONS; Words: ' players users '; Head: 'players'; Help: 'players who used it there'));
+    (Kind: MXF_WEAPONS; Words: ' players users '; Head: 'players'; Help: 'players who used it there'),
+    (Kind: MXF_WEAPONS; Words: ' hitdist avghitdist '; Head: 'hit distance'; Help: 'the hits'' average, since 5.6'),
+    (Kind: MXF_WEAPONS; Words: ' longesthit longhit '; Head: 'longest hit'; Help: ''),
+    (Kind: MXF_WEAPONS; Words: ' hitair avghitair '; Head: 'hit air time'; Help: 'how long the bullets of hits flew'),
+    (Kind: MXF_WEAPONS; Words: ' killair avgkillair '; Head: 'kill air time'; Help: 'the same of the kills'));
 
 { ---------------- arguments ---------------- }
 
@@ -610,6 +627,8 @@ begin
       'without play.', [E.Cfg.MatrixPruneDays])
   else
     Result := 'Per-map data: counted since 5.5 while the statistics count.';
+  if E.Cfg.MatrixMapPruneDays > 0 then
+    Result := Result + Format(' A map not played for %d days loses its record.', [E.Cfg.MatrixMapPruneDays]);
 end;
 
 { a view of records made before [Matrix] Enabled = 0 shows them with this line }
@@ -902,6 +921,7 @@ var
   Shots, Base: Int64;
   TeamStyle, Rounds, Teams: Boolean;
   Frag, Cluster, M79, Law, Fists, Saw, Flamer, M2: TPMWeapon;
+  Cells: TStringArray;
 begin
   if not MatrixRecord(E, Slot, Rest, '!mapplayerotherstats', ByRank, MapName, Idx, R) then
     Exit;
@@ -947,9 +967,23 @@ begin
     Top := '-';
   Row(E, Slot, ['Longest Kill: ' + Top, 'Longest Barrett: ' + FloatStr(R^.LongestBarrett, 1) + 'm',
     'Avg Kill Dist: ' + FloatStr(SafeDivD(R^.KillDistSum, R^.KillDistCount), 1) + 'm'], COLS3, WHITE);
+  { [Bridges] (5.6): the hits and kills measured from where and when their bullet was made }
+  if R^.HitDistCount + R^.KillAirCount > 0 then
+  begin
+    Cells := nil;
+    PushCell(Cells, 'Longest Hit: ' + MetersText(R^.LongestHit));
+    PushCell(Cells, 'Avg Hit Dist: ' + AvgMetersText(R^.HitDistSum, R^.HitDistCount));
+    PushCell(Cells, 'Avg Hit Air: ' + AvgAirText(R^.HitAirTicks, R^.HitAirCount));
+    PushCell(Cells, 'Avg Kill Air: ' + AvgAirText(R^.KillAirTicks, R^.KillAirCount));
+    FlowCells(E, Slot, Cells, 3, WHITE);
+  end;
   Row(E, Slot, ['100m+ Kills: ' + Num(R^.LongKills100), 'Barrett Long: ' + Num(R^.BarrettLongKills),
     'Unclear Zone: ' + Num(R^.HitsUnknown)], COLS3, WHITE);
-  Row(E, Slot, ['Accuracy: ' + Pct(R^.Hits, Shots), Format('Hits: %s/%s', [Num(R^.Hits), Num(Shots)])], COLS3, WHITE);
+  Row(E, Slot, ['Accuracy: ' + Pct(R^.Hits, Shots), Format('Hits: %s/%s', [Num(R^.Hits), Num(Shots)]),
+    IfText(R^.CollateralKills > 0, 'Collaterals: ' + Num(R^.CollateralKills))], COLS3, WHITE);
+  Top := StanceAccText(R^.StanceShots, R^.StanceHits);
+  if Top <> '' then
+    Out(E, Slot, Top, WHITE);
 
   Section(E, Slot, 'Timing, Movement & Positioning', LINE_W);
   Row(E, Slot, ['Avg TTK: ' + FloatStr(SafeDivD(R^.TTKSumTicks, R^.TTKCount) / TICKS_PER_SECOND, 2) + 's',
@@ -1000,7 +1034,9 @@ begin
     Format('Selfkills: %s (%s)', [Num(R^.Selfkills), Pct(R^.Selfkills, Base)]),
     IfText(R^.SelfkillsUnderFire > 0, Format('Under Fire: %s (%s)', [Num(R^.SelfkillsUnderFire),
       Pct(R^.SelfkillsUnderFire, R^.Selfkills)])),
-    'Map Points: ' + Signed(R^.Points)], COLS3, WHITE);
+    'Map Points: ' + Signed(R^.Points),
+    IfText(R^.BackKills + R^.BackDeaths > 0, 'Back Kills: ' + Num(R^.BackKills)),
+    IfText(R^.BackKills + R^.BackDeaths > 0, 'Back Deaths: ' + Num(R^.BackDeaths))], COLS3, WHITE);
 
   if (R^.Caps + R^.Returns + R^.Grabs + R^.FlagDrops + R^.FlaggerKills + R^.FlagHoldTime > 0) or ObjectiveMode(E) then
   begin
@@ -1132,6 +1168,22 @@ begin
     CLR_HINT);
 end;
 
+{ [Bridges] (5.6): the head of the range table of the weapons of a map }
+procedure RangeHead(E: TZSEngine; Slot: LongInt);
+begin
+  Section(E, Slot, 'Range: hits measured from where the bullet was made (since 5.6)', LINE_W);
+  Row(E, Slot, ['Weapon', 'LongHit', 'HitDist', 'HitAir', 'KillAir', 'Measured'], PM_RANGE_COLS, CLR_SUBHEADER);
+end;
+
+{ one weapon of the range table: the longest hit and the averages, - where nothing was measured (the air
+  time of a flame or a grenade); Measured: the hits with a distance }
+procedure RangeLine(E: TZSEngine; Slot, S: LongInt; Longest: Single; DistSum: Double; DistCount, HitAirTicks,
+  HitAirCount, KillAirTicks, KillAirCount: Int64; Color: LongInt);
+begin
+  Row(E, Slot, [SlotName(S), MetersText(Longest), AvgMetersText(DistSum, DistCount), AvgAirText(HitAirTicks, HitAirCount),
+    AvgAirText(KillAirTicks, KillAirCount), Num(DistCount)], PM_RANGE_COLS, Color);
+end;
+
 { !mapplayerweapstats [map] [p]: the weapon table of !allweapons for one map - only the weapons the
   record has; Share is the weapon's share of the kills there }
 procedure CmdMapPlayerWeapStats(E: TZSEngine; Slot: LongInt; const Rest: AnsiString; ByRank: Boolean);
@@ -1141,6 +1193,7 @@ var
   R: PPlayerMapStats;
   Wp: TPMWeapon;
   Shots: Int64;
+  Any: Boolean;
 begin
   if not MatrixRecord(E, Slot, Rest, '!mapplayerweapstats', ByRank, MapName, Idx, R) then
     Exit;
@@ -1167,6 +1220,19 @@ begin
   end;
   Section(E, Slot, 'Damage on this Map', LINE_W);
   DamageRows(E, Slot, R^.DamageDealt, R^.DamageReceived, R^.Kills, R^.Deaths, CLR_SHOOTING);
+  { [Bridges] (5.6): how far the player's hits here flew, by weapon }
+  Any := False;
+  for k := 0 to High(R^.Weapons) do
+  begin
+    Wp := R^.Weapons[k];
+    if (Wp.Slot < 0) or (Wp.Slot >= WSLOT_COUNT) or (Int64(Wp.HitDistCount) + Wp.KillAirCount = 0) then
+      Continue;
+    if not Any then
+      RangeHead(E, Slot);
+    Any := True;
+    RangeLine(E, Slot, Wp.Slot, Wp.LongestHit, Wp.HitDistSum, Wp.HitDistCount, Wp.HitAirTicks, Wp.HitAirCount,
+      Wp.KillAirTicks, Wp.KillAirCount, CLR_SHOOTING);
+  end;
   Out(E, Slot, 'Share = of the kills here. Every map together: !allweapons; one weapon in detail: !wep <name>', CLR_HINT);
   Footer(E, Slot, LINE_W);
 end;
@@ -2062,6 +2128,14 @@ begin
       Inc(T[S].Headshots, W.Headshots);
       Inc(T[S].Time, W.TimeUsed);
       T[S].Damage := T[S].Damage + W.Damage;
+      T[S].HitDistSum := T[S].HitDistSum + W.HitDistSum;
+      Inc(T[S].HitDistCount, W.HitDistCount);
+      if W.LongestHit > T[S].LongestHit then
+        T[S].LongestHit := W.LongestHit;
+      Inc(T[S].HitAirTicks, W.HitAirTicks);
+      Inc(T[S].HitAirCount, W.HitAirCount);
+      Inc(T[S].KillAirTicks, W.KillAirTicks);
+      Inc(T[S].KillAirCount, W.KillAirCount);
       if PMWeaponUsed(W) then
         Inc(T[S].Players);
     end;
@@ -2122,6 +2196,26 @@ begin
     WPS_DMG: V := T.Damage;
     WPS_TIME: V := T.Time;
     WPS_PLAYERS: V := T.Players;
+    WPS_HITDIST:
+      begin
+        V := SafeDivD(T.HitDistSum, T.HitDistCount);
+        Defined := T.HitDistCount > 0;
+      end;
+    WPS_LONGHIT:
+      begin
+        V := T.LongestHit;
+        Defined := T.HitDistCount > 0;
+      end;
+    WPS_HITAIR:
+      begin
+        V := SafeDivD(T.HitAirTicks, T.HitAirCount);
+        Defined := T.HitAirCount > 0;
+      end;
+    WPS_KILLAIR:
+      begin
+        V := SafeDivD(T.KillAirTicks, T.KillAirCount);
+        Defined := T.KillAirCount > 0;
+      end;
     else V := T.Kills;
   end;
   if Defined then
@@ -2150,6 +2244,7 @@ var
   Picks: array[0..WSLOT_COUNT - 1] of Int64;
   Cells: TStringArray;
   X: TMapWeapon;
+  Any: Boolean;
 begin
   MI := E.DB.FindMap(MapName, False);
   if MI < 0 then
@@ -2224,7 +2319,22 @@ begin
   PushCell(Cells, TopPickText('Top primary', Picks, False, True));
   PushCell(Cells, TopPickText('Top secondary', Picks, True, True));
   PushCell(Cells, Format('Damage: %s (~%s kills)', [Dmg(AllDmg), KillEq(E, AllDmg)]));
+  if M^.HitDistCount > 0 then
+    PushCell(Cells, 'Avg Hit Dist: ' + AvgMetersText(M^.HitDistSum, M^.HitDistCount));
   FlowCells(E, Slot, Cells, 3, WHITE);
+  { [Bridges] (5.6): how far the hits of the weapons of this page flew, as far as they were measured }
+  Any := False;
+  for k := First to Last do
+  begin
+    X := T[Shown[Rows[k]]];
+    if X.HitDistCount + X.KillAirCount = 0 then
+      Continue;
+    if not Any then
+      RangeHead(E, Slot);
+    Any := True;
+    RangeLine(E, Slot, X.Slot, X.LongestHit, X.HitDistSum, X.HitDistCount, X.HitAirTicks, X.HitAirCount, X.KillAirTicks,
+      X.KillAirCount, WHITE);
+  end;
   Footer(E, Slot, LINE_W);
   Out(E, Slot, 'Kills, Share, Pick%: the map''s own counters, all time. Shots to Time, Players: the per-map records.',
     CLR_HINT);
@@ -2357,6 +2467,17 @@ begin
     if ZoneClassifiableStyle(Wep) or (X.Headshots > 0) then
       PushCell(Cells, Format('Headshots: %s (%s)', [Num(X.Headshots), ShareOrDash(X.Headshots, X.Hits)]));
     PushCell(Cells, 'Hits/Kill: ' + RatioOrDash(X.Hits, X.RKills, 2));
+    { [Bridges] (5.6): how far its hits here flew and for how long }
+    if SlotHitMeasured(S) and (X.HitDistCount > 0) then
+    begin
+      PushCell(Cells, 'Longest Hit: ' + MetersText(X.LongestHit));
+      PushCell(Cells, 'Avg Hit Dist: ' + AvgMetersText(X.HitDistSum, X.HitDistCount));
+    end;
+    if SlotAirTimed(S) and (X.HitAirCount + X.KillAirCount > 0) then
+    begin
+      PushCell(Cells, 'Avg Hit Air: ' + AvgAirText(X.HitAirTicks, X.HitAirCount));
+      PushCell(Cells, 'Avg Kill Air: ' + AvgAirText(X.KillAirTicks, X.KillAirCount));
+    end;
     FlowCells(E, Slot, Cells, 3, WHITE);
   end;
 

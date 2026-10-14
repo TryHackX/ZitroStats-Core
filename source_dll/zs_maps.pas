@@ -133,6 +133,7 @@ type
     LastTarget: AnsiString;
     LastResult: AnsiString;
     LastEndTick: LongInt;
+    GapUntil: LongInt;             { no new vote before this tick ([MapVote] GapSeconds after a vote) }
     SoldatUntil: LongInt;          { Soldat's own vote (the clients' dialog, F12) lasts until this tick }
     { a vote that passed and waits for its map change }
     ChangeTarget: AnsiString;

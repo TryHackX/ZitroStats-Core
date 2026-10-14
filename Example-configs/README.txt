@@ -1,4 +1,4 @@
-ZitroStats 5.2 - example settings
+ZitroStats 5.7 - example settings
 =================================
 
 Ready settings for the usual kinds of server. Each file is the whole settings.ini of ZitroStats
@@ -106,7 +106,8 @@ What you still fill in
 
 [Mail]
     Only for e-mail codes (/setemail, /forgotpass): Enabled = 1, SmtpUrl, SmtpUser,
-    SmtpPassword, FromAddress (a valid address, or e-mail stays off) and ServerName.
+    SmtpPassword, FromAddress (a valid address, or e-mail stays off) and ServerName. The limits
+    (MaxPerDay of an account, MaxPerDayServer, MaxPerDaySource) are set already.
 
 [Webhook]
     Only for posts to a website or to Discord: Enabled = 1, Url, Events and Format (discord for

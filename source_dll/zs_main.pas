@@ -6,8 +6,9 @@ library zitrostats_dll;
   once except ZS_Shutdown, which waits while the engine thread writes what is pending and stops,
   and ZS_API_Top_Player_Copy, which waits for the engine and is never called from the game
   thread. Game events are only queued here; the engine thread does the work (see zs_engine).
-  When the engine falls far behind, the queue drops the events other than joins, leaves and map
-  changes, so the game thread never waits for it and the queue does not grow without end.
+  When the engine falls far behind, the queue drops the events that come many times a second
+  (position samples, bullets, ammunition, hits, shots, heals), so the game thread never waits for
+  it and the queue does not grow without end; the events that carry a state always go in.
 
   The library pins itself on the first ZS_Init. A script reload therefore finds the running
   engine again instead of unloading code under running threads. ZS_Shutdown (called from the
@@ -29,6 +30,8 @@ library zitrostats_dll;
     ZS_Ev_Leave         slot, kicked
     ZS_Ev_Team          slot, new team
     ZS_Ev_Steam_Auth    slot, SteamID, auth state (0 = ok)
+    ZS_Ev_Admin         slot, the admin token while the player has the server's admin rights, 0 when
+                        he lost them (API 17; main.pas sends a change once a second)
     ZS_Ev_Spawn         slot, primary, secondary, position
     ZS_Ev_Kill          killer, victim, bullet id, weapon, EF_* flags (EF_SERVER_KILL: the server
                         killed the player itself, no death), victim weapon,
@@ -51,9 +54,11 @@ library zitrostats_dll;
     ZS_Ev_Flag          slot, FLAG_* kind, team, position; FLAG_BASE (slot 0) = where a flag
                         stands in its base
     ZS_Ev_Sample        slot, EF_A_* flags, weapon, ammo, jets, position
-    ZS_Ev_Tick          once per second: team scores, time left, game style
+    ZS_Ev_Tick          once per second: team scores, time left, game style, 1 while the game is
+                        paused (/pause: the seconds count for nothing)
     ZS_Ev_Map_Before    next map, final team scores, time left, score limit
-    ZS_Ev_Map_After     map, game style, score limit, time limit, MF_* flags
+    ZS_Ev_Map_After     map, game style, score limit, time limit, MF_* flags (MF_RUNNING = 16 only
+                        from the script's start: the map already runs, its score is not new)
     ZS_Ev_Player_Score  slot, scoreboard kills, deaths (sent right before ZS_Ev_Map_Before)
     ZS_Ev_Vote          slot, kind (1 map vote started, 2 kick vote started, 3 a vote cast for the
                         map vote that runs), target. With [MapVote] Enabled the map vote is the
@@ -116,7 +121,7 @@ library zitrostats_dll;
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
   {$IFDEF WINDOWS}Windows,{$ENDIF}
-  SysUtils, zs_types, zs_util, zs_engine, zs_commands, zs_crash, zs_maps;
+  SysUtils, zs_types, zs_util, zs_engine, zs_commands, zs_crash, zs_maps, zs_bridge, zs_hook;
 
 const
   { the names of the maps list (ZS_Ev_Map_List) are read up to this length }
@@ -241,14 +246,18 @@ begin
     if ApiVersion <> ZS_API_VERSION then
       Exit(-ZS_API_VERSION);
     PinModule;
+    BridgePush := @Queue;
+    BridgeReset;
     if Engine = nil then
     begin
       Fresh := True;
       Engine := TZSEngine.Create(Str(ScriptDir, 1024));
       Engine.LibraryPath := SelfModulePath;
-      { read before the engine thread runs: loading the database holds the state lock for long }
-      Dir := CrashDirOf(Engine);
       Engine.Start;
+      { the log folder is known once Start has read settings.ini, here on the game thread; the
+        engine thread changes it only at a settings reload, which no event asked for yet. Read
+        without the state lock, which loading the database holds for long. }
+      Dir := CrashDirOf(Engine);
     end
     else
     begin
@@ -289,6 +298,12 @@ procedure ZS_Shutdown; cdecl;
 begin
   try
     CrashTrail('shutdown', 0, 0);
+    { the bullets of the last tick still count: they reach the engine before it stops }
+    BridgeDrainShots;
+    { the hooks in the server go while the script is away; the next ZS_Frame puts them back. The
+      map walls go with the engine. }
+    HookRemove;
+    BridgeGeoReady := 0;
     if Engine <> nil then
     begin
       Engine.Shutdown;
@@ -362,6 +377,7 @@ begin
     Ev.I[1] := Human;
     Ev.I[2] := Ord((Engine <> nil) and Engine.TokenValid(Admin));
     Queue(Ev);
+    BridgeJoin(Slot, Human);
     CrashTrail('join', Slot, Human);
   except
   end;
@@ -377,6 +393,7 @@ begin
     Ev.Slot := Slot;
     Ev.I[0] := Kicked;
     Queue(Ev);
+    BridgeLeave(Slot);
     CrashTrail('leave', Slot, Kicked);
   except
   end;
@@ -392,6 +409,7 @@ begin
     Ev.Slot := Slot;
     Ev.I[0] := Team;
     Queue(Ev);
+    BridgeRestart(Slot);
     CrashTrail('team', Slot, Team);
   except
   end;
@@ -413,6 +431,20 @@ begin
   end;
 end;
 
+procedure ZS_Ev_Admin(Slot, IsAdmin: LongInt); cdecl;
+var
+  Ev: TZSEvent;
+begin
+  try
+    Ev := NewEvent(zeAdmin);
+    Ev.Slot := Slot;
+    { as the admin of ZS_Ev_Join: only with the token main.pas claimed; 0 takes the rights away }
+    Ev.I[0] := Ord((Engine <> nil) and Engine.TokenValid(IsAdmin));
+    Queue(Ev);
+  except
+  end;
+end;
+
 procedure ZS_Ev_Spawn(Slot, Primary, Secondary, Tick: LongInt; X, Y: Single); cdecl;
 var
   Ev: TZSEvent;
@@ -426,6 +458,7 @@ begin
     Ev.F[0] := X;
     Ev.F[1] := Y;
     Queue(Ev);
+    BridgeRestart(Slot);
   except
   end;
 end;
@@ -451,6 +484,7 @@ begin
     Ev.F[4] := BX;
     Ev.F[5] := BY;
     Ev.F[6] := VictimVest;
+    BridgeAddToKill(Ev);
     Queue(Ev);
     CrashTrail('kill', Killer, Victim);
   except
@@ -484,6 +518,7 @@ begin
     Ev.F[10] := VictimVelY;
     Ev.F[11] := ShooterVelX;
     Ev.F[12] := ShooterVelY;
+    BridgeAddToDamage(Ev);
     Queue(Ev);
   except
   end;
@@ -553,6 +588,7 @@ begin
     { the ammunition of both weapons is known (the reload tracking uses it) }
     Ev.I[4] := 1;
     Queue(Ev);
+    BridgeWeapon(Slot, Primary, PrimaryAmmo);
   except
   end;
 end;
@@ -589,17 +625,35 @@ begin
   end;
 end;
 
-procedure ZS_Ev_Kit(Slot, Style, Tick: LongInt); cdecl;
+{ 1 = the health the kit gave was read from memory and counted here (main.pas then counts
+  nothing), 0 = main.pas counts it from its own reading as before }
+function ZS_Ev_Kit(Slot, Style, Tick: LongInt): LongInt; cdecl;
 var
   Ev: TZSEvent;
+  Heal: Single;
 begin
+  Result := 0;
   try
     Ev := NewEvent(zeKit);
     Ev.Tick := Tick;
     Ev.Slot := Slot;
     Ev.I[0] := Style;
     Queue(Ev);
+    if BridgeKitHeal(Slot, Style, Heal) then
+    begin
+      Result := 1;
+      if Heal > 0 then
+      begin
+        Ev := NewEvent(zeHeal);
+        Ev.Tick := Tick;
+        Ev.Slot := Slot;
+        Ev.I[0] := 1;
+        Ev.F[1] := Heal;
+        Queue(Ev);
+      end;
+    end;
   except
+    Result := 0;
   end;
 end;
 
@@ -655,7 +709,7 @@ begin
   end;
 end;
 
-procedure ZS_Ev_Tick(Tick, Alpha, Bravo, Charlie, Delta, TimeLeft, GameStyle: LongInt); cdecl;
+procedure ZS_Ev_Tick(Tick, Alpha, Bravo, Charlie, Delta, TimeLeft, GameStyle, Paused: LongInt); cdecl;
 var
   Ev: TZSEvent;
 begin
@@ -668,6 +722,7 @@ begin
     Ev.I[3] := Delta;
     Ev.I[4] := TimeLeft;
     Ev.I[5] := GameStyle;
+    Ev.I[6] := Paused;
     Queue(Ev);
   except
   end;
@@ -705,7 +760,10 @@ begin
     Ev.I[1] := ScoreLimit;
     Ev.I[2] := TimeLimit;
     Ev.I[3] := Flags;
+    { R6: the walls of the map before are no walls of this one; the engine says when it has these }
+    BridgeGeoReady := 0;
     Queue(Ev);
+    BridgeMapChange;
     CrashTrail('map start', GameStyle, Flags);
   except
   end;
@@ -879,12 +937,103 @@ begin
   end;
 end;
 
+{ ---------------- [Bridges] (5.6): the server read directly ---------------- }
+
+{ the first call of every tick: the bullets of the last tick, the humans followed from the server's
+  memory (bit = slot - 1: main.pas leaves those out of its own TrackPlayer), the bots' lives }
+function ZS_Frame(Tick: LongInt): LongInt; cdecl;
+begin
+  Result := 0;
+  try
+    Result := BridgeFrame(Tick);
+  except
+    Result := 0;
+  end;
+end;
+
+{ the soldier of a slot: Obj is the script's player object (ScriptCore passes the object itself),
+  X, Y its Player.X, Player.Y of this moment; 1 = bound }
+function ZS_Bind(Slot: LongInt; Obj: Pointer; X, Y: Single): LongInt; cdecl;
+begin
+  Result := 0;
+  try
+    Result := BridgeBind(Slot, Obj, X, Y);
+  except
+    Result := 0;
+  end;
+end;
+
+{ once a second, one player: his properties against the server's memory (State: bit 0 alive, 1 on
+  the ground, 2 prone, 3 flagger; Keys: bit 0 left, 1 right, 2 up, 3 crouch, 4 fire, 5 jetpack,
+  6 grenade, 7 change weapon, 8 throw weapon, 9 reload, 10 prone, 11 flag throw). 1 = the same,
+  0 = a difference (the reading is off for good, main.pas reads the properties), -1 = not checked }
+function ZS_Check(Slot, State, W, A, SW, SA, Gren, Jets, Team, Keys: LongInt; X, Y, Health, Vest: Single): LongInt;
+  cdecl;
+begin
+  Result := -1;
+  try
+    Result := BridgeCheck(Slot, State, W, A, SW, SA, Gren, Jets, Team, Keys, X, Y, Health, Vest);
+  except
+    Result := -1;
+  end;
+end;
+
+{ what runs: 1 = the hook in CreateBullet (shots, grenades and thrown knives come from it),
+  2 = the soldiers are read from memory, 4 = the hook in HealthHit (the zones of the hits) }
+function ZS_Bridges: LongInt; cdecl;
+begin
+  Result := 0;
+  try
+    Result := BridgeState;
+  except
+    Result := 0;
+  end;
+end;
+
+{ OnDamage with the ids only (Damage as OnDamage got it, above 0): 1 = read and queued, 0 = the
+  players cannot be read - main.pas sends ZS_Ev_Damage }
+function ZS_Ev_Hit(Shooter, Victim, BulletId, Tick: LongInt; Damage: Single): LongInt; cdecl;
+var
+  Ev: TZSEvent;
+begin
+  Result := 0;
+  try
+    if BridgeHit(Shooter, Victim, BulletId, Tick, Damage, Ev) then
+    begin
+      Queue(Ev);
+      Result := 1;
+    end;
+  except
+    Result := 0;
+  end;
+end;
+
+{ OnKill with the ids only (Flags: EF_SERVER_KILL when the server killed the player itself): 1 =
+  read and queued, 0 = main.pas sends ZS_Ev_Kill }
+function ZS_Ev_Death(Killer, Victim, BulletId, Flags, Tick: LongInt): LongInt; cdecl;
+var
+  Ev: TZSEvent;
+begin
+  Result := 0;
+  try
+    if BridgeDeath(Killer, Victim, BulletId, Flags, Tick, Ev) then
+    begin
+      Queue(Ev);
+      Result := 1;
+      CrashTrail('kill', Killer, Victim);
+    end;
+  except
+    Result := 0;
+  end;
+end;
+
 { ---------------- output ---------------- }
 
 function ZS_Action_Begin: LongInt; cdecl;
 begin
   Result := 0;
   try
+    BridgeTickEnd;
     if Engine <> nil then
       Result := Engine.BeginActions;
   except
@@ -1079,6 +1228,39 @@ begin
   end;
 end;
 
+{ The same as ZS_API_Top_Player_Copy with the computer of the account as well (API 17): name, tab,
+  SteamID, tab, HWID. Another library can then find an account without a SteamID by its computer
+  instead of by a name anybody can take. }
+function ZS_API_Top_Player_Copy2(Rank: LongInt; Buf: PChar; Size: LongInt): LongInt; cdecl;
+var
+  S: AnsiString;
+begin
+  Result := 0;
+  try
+    if (Buf = nil) or (Size < 1) then
+      Exit;
+    Buf[0] := #0;
+    if Size < 2 then
+      Exit;
+    S := '';
+    EnterCriticalSection(ExtLock);
+    try
+      if Engine <> nil then
+        S := Engine.ApiTopPlayerWait(Rank, True);
+    finally
+      LeaveCriticalSection(ExtLock);
+    end;
+    if Length(S) >= Size then
+      SetLength(S, Size - 1);
+    if S <> '' then
+      Move(S[1], Buf^, Length(S));
+    Buf[Length(S)] := #0;
+    Result := Length(S);
+  except
+    Result := 0;
+  end;
+end;
+
 function ZS_API_Get_Server_Peak: LongInt; cdecl;
 begin
   try
@@ -1111,6 +1293,7 @@ exports
   ZS_Ev_Leave,
   ZS_Ev_Team,
   ZS_Ev_Steam_Auth,
+  ZS_Ev_Admin,
   ZS_Ev_Spawn,
   ZS_Ev_Kill,
   ZS_Ev_Damage,
@@ -1148,8 +1331,15 @@ exports
   ZS_API_Get_Profile_Count,
   ZS_API_Get_Top_Player,
   ZS_API_Top_Player_Copy,
+  ZS_API_Top_Player_Copy2,
   ZS_API_Get_Server_Peak,
-  ZS_API_Get_Player_HUD;
+  ZS_API_Get_Player_HUD,
+  ZS_Frame,
+  ZS_Bind,
+  ZS_Check,
+  ZS_Bridges,
+  ZS_Ev_Hit,
+  ZS_Ev_Death;
 
 begin
   InitCriticalSection(ExtLock);

@@ -11,8 +11,18 @@ unit ZitroStats_Core;
   the clients as Soldat's own vote (with a vote percent of 200, which never passes, put back
   afterwards) and changes the map when the library says so.
 
+  The bridges ([Bridges] in settings.ini, 5.6): the library reads the soldiers and the bullets from
+  the server's memory and sees every bullet the server makes (a hook in its code). Then the tick
+  asks the properties only of the players the library cannot read (ZS_Frame), and a hit or a kill
+  sends only the ids (ZS_Ev_Hit, ZS_Ev_Death). Whatever the library cannot read, the script reads
+  as before; once a second one player's properties are compared with the memory, and a difference
+  switches the reading off for good.
+
   The library is loaded from this script folder. If the folder is renamed, replace
-  "scripts/ZitroStats-Core/" in the declarations below (the path must not contain spaces). }
+  "scripts/ZitroStats-Core/" in the declarations below (the path must not contain spaces). The
+  calls added since API 16 are declared "delayload": a library of an older release still loads
+  with the script and ZS_Init says that the two do not belong together; they are called only
+  after ZS_Init accepted the API. }
 
 interface
 
@@ -37,6 +47,10 @@ external {$IFDEF WIN32} 'ZS_Ev_Team@scripts/ZitroStats-Core/zitrostats_dll.dll c
 procedure ZS_Ev_Steam_Auth(Slot: Integer; Steam: PChar; State, Tick: Integer);
 external {$IFDEF WIN32} 'ZS_Ev_Steam_Auth@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Ev_Steam_Auth@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
 
+{ the server's admin rights of a human changed (API 17): the admin token, or 0 }
+procedure ZS_Ev_Admin(Slot, IsAdmin: Integer);
+external {$IFDEF WIN32} 'ZS_Ev_Admin@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl delayload' {$ELSE} 'ZS_Ev_Admin@scripts/ZitroStats-Core/zitrostats_dll.so cdecl delayload' {$ENDIF};
+
 procedure ZS_Ev_Spawn(Slot, Primary, Secondary, Tick: Integer; X, Y: Single);
 external {$IFDEF WIN32} 'ZS_Ev_Spawn@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Ev_Spawn@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
 
@@ -45,9 +59,6 @@ external {$IFDEF WIN32} 'ZS_Ev_Kill@scripts/ZitroStats-Core/zitrostats_dll.dll c
 
 procedure ZS_Ev_Damage(Shooter, Victim, BulletId, Weapon, Flags, Tick: Integer; Damage, VictimVest, BX, BY, BVX, BVY, VX, VY, VictimHealth, VictimVelX, VictimVelY, ShooterVelX, ShooterVelY: Single);
 external {$IFDEF WIN32} 'ZS_Ev_Damage@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Ev_Damage@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
-
-procedure ZS_Ev_Shot(Slot, Weapon, Count, Tick: Integer; X, Y: Single);
-external {$IFDEF WIN32} 'ZS_Ev_Shot@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Ev_Shot@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
 
 procedure ZS_Ev_Grenade(Slot, Count, Cluster, Tick: Integer; X, Y: Single);
 external {$IFDEF WIN32} 'ZS_Ev_Grenade@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Ev_Grenade@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
@@ -64,7 +75,8 @@ external {$IFDEF WIN32} 'ZS_Ev_Ammo@scripts/ZitroStats-Core/zitrostats_dll.dll c
 procedure ZS_Ev_Realistic(Realistic, Tick: Integer);
 external {$IFDEF WIN32} 'ZS_Ev_Realistic@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Ev_Realistic@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
 
-procedure ZS_Ev_Kit(Slot, Style, Tick: Integer);
+{ 1 = the library read the health and counted what the kit gave ([Bridges]) }
+function ZS_Ev_Kit(Slot, Style, Tick: Integer): Integer;
 external {$IFDEF WIN32} 'ZS_Ev_Kit@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Ev_Kit@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
 
 procedure ZS_Ev_Heal(Slot, Kits, Tick: Integer; Regen, Kit: Single);
@@ -76,7 +88,7 @@ external {$IFDEF WIN32} 'ZS_Ev_Flag@scripts/ZitroStats-Core/zitrostats_dll.dll c
 procedure ZS_Ev_Sample(Slot, Flags, Weapon, Ammo, Jets, Tick: Integer; X, Y: Single);
 external {$IFDEF WIN32} 'ZS_Ev_Sample@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Ev_Sample@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
 
-procedure ZS_Ev_Tick(Tick, Alpha, Bravo, Charlie, Delta, TimeLeft, GameStyle: Integer);
+procedure ZS_Ev_Tick(Tick, Alpha, Bravo, Charlie, Delta, TimeLeft, GameStyle, Paused: Integer);
 external {$IFDEF WIN32} 'ZS_Ev_Tick@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Ev_Tick@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
 
 procedure ZS_Ev_Map_Before(NextMap: PChar; Alpha, Bravo, Charlie, Delta, TimeLeft, ScoreLimit, Tick: Integer);
@@ -127,13 +139,41 @@ external {$IFDEF WIN32} 'ZS_Action_Int@scripts/ZitroStats-Core/zitrostats_dll.dl
 function ZS_Action_Text(): PChar;
 external {$IFDEF WIN32} 'ZS_Action_Text@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl' {$ELSE} 'ZS_Action_Text@scripts/ZitroStats-Core/zitrostats_dll.so cdecl' {$ENDIF};
 
+{ [Bridges]: the first call of every tick; the answer has a bit for every human the library reads
+  from the server's memory itself (bit = slot - 1) }
+function ZS_Frame(Tick: Integer): Integer;
+external {$IFDEF WIN32} 'ZS_Frame@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl delayload' {$ELSE} 'ZS_Frame@scripts/ZitroStats-Core/zitrostats_dll.so cdecl delayload' {$ENDIF};
+{ the soldier of a slot in the server's memory: the player object and where it stands; 1 = found }
+function ZS_Bind(Slot: Integer; P: TActivePlayer; X, Y: Single): Integer;
+external {$IFDEF WIN32} 'ZS_Bind@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl delayload' {$ELSE} 'ZS_Bind@scripts/ZitroStats-Core/zitrostats_dll.so cdecl delayload' {$ENDIF};
+{ one player's properties against the memory: 1 = the same, 0 = a difference (the reading is off) }
+function ZS_Check(Slot, State, W, A, SW, SA, Gren, Jets, Team, Keys: Integer; X, Y, Health, Vest: Single): Integer;
+external {$IFDEF WIN32} 'ZS_Check@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl delayload' {$ELSE} 'ZS_Check@scripts/ZitroStats-Core/zitrostats_dll.so cdecl delayload' {$ENDIF};
+{ what runs: BR_* bits }
+function ZS_Bridges(): Integer;
+external {$IFDEF WIN32} 'ZS_Bridges@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl delayload' {$ELSE} 'ZS_Bridges@scripts/ZitroStats-Core/zitrostats_dll.so cdecl delayload' {$ENDIF};
+{ a hit and a kill with the ids only: 1 = the library read the rest, 0 = send the full event }
+function ZS_Ev_Hit(Shooter, Victim, BulletId, Tick: Integer; Damage: Single): Integer;
+external {$IFDEF WIN32} 'ZS_Ev_Hit@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl delayload' {$ELSE} 'ZS_Ev_Hit@scripts/ZitroStats-Core/zitrostats_dll.so cdecl delayload' {$ENDIF};
+function ZS_Ev_Death(Killer, Victim, BulletId, Flags, Tick: Integer): Integer;
+external {$IFDEF WIN32} 'ZS_Ev_Death@scripts/ZitroStats-Core/zitrostats_dll.dll cdecl delayload' {$ELSE} 'ZS_Ev_Death@scripts/ZitroStats-Core/zitrostats_dll.so cdecl delayload' {$ENDIF};
+
 const
-  ZS_API_VERSION = 15;
+  ZS_API_VERSION = 17;
+
+  { what ZS_Bridges answers }
+  BR_HOOK = 1;       { the hook in CreateBullet: shots, grenades and thrown knives come from the server }
+  BR_MEMORY = 2;     { the soldiers are read from the server's memory }
+  BR_HITHOOK = 4;    { the hook in HealthHit: the part of the body every hit landed on }
+  BR_MAPWALLS = 8;   { the library has the walls of the map: a kill needs no Map.RayCast }
 
   { command sources }
   SRC_CHAT = 0;
   SRC_COMMAND = 1;
   SRC_CONSOLE = 2;
+  { the handler a player's command came through (an admin's comes through both) }
+  CMD_VIA_COMMAND = 1;
+  CMD_VIA_ADMIN = 2;
 
   { output requested by the library }
   ACT_CONSOLE = 1;
@@ -227,6 +267,8 @@ const
   MF_REALISTIC = 2;
   MF_ADVANCE = 4;
   MF_FRIENDLYFIRE = 8;
+  { the map already runs: sent only from the script's start (a /recompile in the middle of a map) }
+  MF_RUNNING = 16;
 
   VOTE_MAP = 1;
   VOTE_KICK = 2;
@@ -237,13 +279,19 @@ const
   TEAM_BRAVO = 2;
   TEAM_DELTA = 4;
   TEAM_SPECTATOR = 5;
+  GS_TM = 2;
   GS_CTF = 3;
   GS_INF = 5;
+  GS_HTF = 6;
   { the server hits a player with 4000 when it kills them itself, and a vest turns that hit into
     exactly 1000; the heaviest hits of players and admins (/brutalkill 3423, pkill 3430) stay
     below SERVER_HIT_DAMAGE and are never 1000 }
   SERVER_HIT_DAMAGE = 3900;
   SERVER_HIT_VEST = 1000;
+  { such a hit is the server's own only at the end of a survival round (no bullet: id 255) or in the
+    tick a player asked to enter a team (OnBeforeJoin); the same hit from a script's Player.Damage
+    (Basic-Extended kills that way) is a real death }
+  SERVER_HIT_BULLET = 255;
   { a map change that was announced and never happened: a pause threw it away }
   MAPCHANGE_LOST_TICKS = 420;
   CLR_GUARD = $FFCC44;
@@ -269,12 +317,18 @@ const
   ANNOUNCE_MAX = 8;
   ANNOUNCES_PER_TICK = 2;    { lines to everybody per tick, like the library's broadcasts }
   PAUSE_NOTE = '[ZitroStats] The map is changing: /pause would cancel it. Try again in a moment.';
+  { the library did not start: the commands of the accounts (the library's identity commands and
+    /zs_setpass) are still taken, so that a password never reaches the server's log }
+  DOWN_COMMANDS = ' register login changepass setemail verifyemail forgotpass resetpass account removemypass zs_setpass ';
+  DOWN_NOTE = '[ZitroStats] The statistics are off on this server now: the account commands do not work.';
 
 var
   Started: Boolean;
   ClockTicks: Integer;
   { admin token from the library: admin commands count only with it }
   Token: Integer;
+  { the admin rights of each human as the library heard them last (1/0); a change goes once a second }
+  AdminSent: array[1..32] of Integer;
   { weapon, ammo and grenades seen on the previous tick; LastWeapon -1 = not tracked yet }
   LastWeapon: array[1..32] of Integer;
   LastAmmo: array[1..32] of Integer;
@@ -288,9 +342,11 @@ var
   HealKits: array[1..32] of Integer;
   { realistic mode as the library last heard it (1/0), -1 = not said yet }
   LastRealistic: Integer;
-  { commands of admins arrive through OnCommand and OnAdminCommand; the second copy is skipped }
+  { commands of admins arrive through OnCommand and then OnAdminCommand: the copy in the other
+    handler (same tick, same text by its hash) gets the answer of the first }
   CmdTick: array[1..32] of Integer;
-  CmdLength: array[1..32] of Integer;
+  CmdHash: array[1..32] of Integer;
+  CmdVia: array[1..32] of Integer;
   CmdHandled: array[1..32] of Boolean;
   { a knife left the hand of a living player: it counts as a throw once a thrown knife flies }
   ThrowWaiting: array[1..32] of Boolean;
@@ -319,6 +375,8 @@ var
   Resurrect: array[1..32] of Boolean;
   { the tick the server killed a player itself }
   ServerKillTick: array[1..32] of Integer;
+  { the tick a player last asked to enter a team (OnBeforeJoin, bots too): survival kills him then }
+  JoinTick: array[1..32] of Integer;
   { the tick of a player's last respawn: a selfkill in that tick is the server refusing it }
   RespawnTick: array[1..32] of Integer;
   { the last tick a player died for real; survival gives the round away only then }
@@ -343,10 +401,30 @@ var
     player inside such a handler can hold up the whole server }
   PauseNote: array[1..32] of Boolean;
   PauseNotes: Integer;
+  { the library did not start: who used an account command hears it on the next tick }
+  DownNote: array[1..32] of Boolean;
+  DownNotes: Integer;
   AnnounceText: array[1..8] of string;
   Announces: Integer;
-  { the humans, noted when they join, so the tick loop does not ask every slot }
+  { the humans, noted when they join, so the tick loop does not ask every slot: by slot, as a list
+    and as bits (bit = slot - 1); a loop of ScriptCore costs about a microsecond a turn }
   HumanSlot: array[1..32] of Boolean;
+  HumanList: array[1..32] of Integer;
+  HumanCount: Integer;
+  HumanMask: Integer;
+  { the humans the library followed in the last tick (ZS_Frame) }
+  FollowMask: Integer;
+  { the teams that can score in the game style that runs: the score guard reads only theirs (a
+    score costs two property reads) }
+  ScoreTeams: Integer;
+  { the guard was off: it notes the scores before it watches them again }
+  GuardWasOff: Boolean;
+  { [Bridges]: the slot's soldier was found in the server's memory (ZS_Bind; the record of a slot
+    never moves), what ZS_Bridges said last, and where the once-a-second look goes on }
+  Bound: array[1..32] of Boolean;
+  BridgeBits: Integer;
+  BindSlot: Integer;
+  CheckSlot: Integer;
   { OnJoin has been seen for the slot (humans and bots) }
   InGame: array[1..32] of Boolean;
   { Map.RayCast is calibrated at most once per map }
@@ -450,10 +528,38 @@ begin
   Valid := B.Active;
 end;
 
+{ the list and the bits of the humans, after a join or a leave }
+procedure NoteHumans();
+var
+  i: Integer;
+begin
+  HumanCount := 0;
+  HumanMask := 0;
+  for i := 1 to 32 do
+    if HumanSlot[i] then
+    begin
+      HumanCount := HumanCount + 1;
+      HumanList[HumanCount] := i;
+      HumanMask := HumanMask or (1 shl (i - 1));
+    end;
+end;
+
+{ the teams that score: none in Deathmatch, Pointmatch and Rambomatch, Alpha and Bravo in the flag
+  games, all four in Teammatch }
+procedure NoteStyle(Style: Integer);
+begin
+  if Style = GS_TM then
+    ScoreTeams := TEAM_DELTA
+  else if (Style = GS_CTF) or (Style = GS_INF) or (Style = GS_HTF) then
+    ScoreTeams := TEAM_BRAVO
+  else
+    ScoreTeams := 0;
+end;
+
 procedure SendJoin(Player: TActivePlayer);
 var
   ID: Integer;
-  IsHuman: Boolean;
+  IsHuman, Admin: Boolean;
   PName, PSteam, PHwid, PIp: string;
 begin
   ID := Player.ID;
@@ -474,17 +580,26 @@ begin
   ThrowWaiting[ID] := False;
   HumanSlot[ID] := IsHuman;
   InGame[ID] := True;
+  NoteHumans();
+  { the join tells the library the admin rights; CheckAdmins sends a later change }
+  Admin := Player.IsAdmin;
+  AdminSent[ID] := BoolInt(Admin);
   ZS_Ev_Join(ID, PChar(PName), PChar(PSteam), PChar(PHwid), PChar(PIp), Player.Team,
-    BoolInt(IsHuman), AdminToken(Player.IsAdmin), Game.TickCount);
+    BoolInt(IsHuman), AdminToken(Admin), Game.TickCount);
+  { the bots too: the library watches their lives }
+  if not Bound[ID] then
+    if ZS_Bind(ID, Player, Player.X, Player.Y) = 1 then
+      Bound[ID] := True;
 end;
 
-procedure SendMapAfter(MapName: string);
+{ Extra: MF_RUNNING from the script's start, 0 at a map change }
+procedure SendMapAfter(MapName: string; Extra: Integer);
 var
   S: string;
 begin
   S := MapName;
   LastRealistic := BoolInt(Game.Realistic);
-  ZS_Ev_Map_After(PChar(S), Game.GameStyle, Game.ScoreLimit, Game.TimeLimit, ModeFlags(), Game.TickCount);
+  ZS_Ev_Map_After(PChar(S), Game.GameStyle, Game.ScoreLimit, Game.TimeLimit, ModeFlags() or Extra, Game.TickCount);
 end;
 
 { Realistic mode can be switched by a command or by another script while a map runs: the library
@@ -632,6 +747,30 @@ begin
   begin
     RayClearIsTrue := Free;
     RayCalibrated := True;
+  end;
+end;
+
+{ Could the killer still see the victim when the victim died (Cover (live))? Map.RayCast answers
+  with the real map geometry; the library uses it when it has no walls of the map itself
+  (BR_MAPWALLS). The first kill of a map calibrates it. }
+function RayFlags(Killer, Victim: TActivePlayer; KillerAlive: Boolean): Integer;
+var
+  Ray: Boolean;
+begin
+  Result := 0;
+  if KillerAlive then
+    if not RayCalibrated then
+      if not RayTried then
+        CalibrateRayCast(Killer.X, Killer.Y);
+  if RayCalibrated then
+    Result := EF_RAY_CAL;
+  if Killer.ID <> Victim.ID then
+  begin
+    Ray := Map.RayCast(Killer.X, Killer.Y, Victim.X, Victim.Y, False, False, True, False, 0);
+    if Ray then
+      Result := Result or EF_RAY_RAW;
+    if Ray = RayClearIsTrue then
+      Result := Result or EF_LOS;
   end;
 end;
 
@@ -842,6 +981,14 @@ begin
   Map.SetMap(Target);
 end;
 
+procedure SnapScores();
+var
+  t: Integer;
+begin
+  for t := TEAM_ALPHA to TEAM_DELTA do
+    ScoreOk[t] := Game.Teams[t].Score;
+end;
+
 procedure PollActions();
 var
   n, Kind, Slot, Team, Answer: Integer;
@@ -861,6 +1008,13 @@ begin
     Text := ZS_Action_Text();
     if Kind = ACT_INTEGRITY then
     begin
+      { the guard turned on: the scores of now are the ones it accepts (it read none while off) }
+      if (IgFlags and IG_ENABLED) = 0 then
+        if (ZS_Action_Int(1) and IG_ENABLED) <> 0 then
+        begin
+          SnapScores();
+          GuardWasOff := False;
+        end;
       IgFlags := ZS_Action_Int(1);
       IgMinOpp := ZS_Action_Int(2);
     end
@@ -928,22 +1082,42 @@ begin
   Result := ZS_Command(Slot, PChar(S), Source, AdminToken(Admin = 1), Game.TickCount) = 1;
 end;
 
-{ True tells the server the command is handled: it is then neither executed nor written to the
-  console log, which keeps /login and /register passwords out of the logs. }
-function PlayerCommand(Player: TActivePlayer; Command: string; Admin: Integer): Boolean;
+{ a command told from another without keeping its text (a password maybe); H stays below
+  1000003 * 31 + 256, so nothing overflows }
+function CommandHash(S: string): Integer;
 var
-  ID, Tick: Integer;
+  i, H: Integer;
+begin
+  H := Length(S);
+  for i := 1 to Length(S) do
+    H := (H mod 1000003) * 31 + Ord(S[i]);
+  Result := H;
+end;
+
+{ True tells the server the command is handled: it is then neither executed nor written to the
+  console log, which keeps /login and /register passwords out of the logs. Via: CMD_VIA_COMMAND or
+  CMD_VIA_ADMIN, the handler it came through. }
+function PlayerCommand(Player: TActivePlayer; Command: string; Admin, Via: Integer): Boolean;
+var
+  ID, Tick, Hash: Integer;
 begin
   ID := Player.ID;
   Tick := Game.TickCount;
-  if (CmdTick[ID] = Tick) and (CmdLength[ID] = Length(Command)) then
-  begin
-    Result := CmdHandled[ID];
-    Exit;
-  end;
+  Hash := CommandHash(Command);
+  { the second copy of an admin's command: the other handler, the same tick and text. Two commands
+    of a player in one tick both run. }
+  if CmdTick[ID] = Tick then
+    if CmdVia[ID] <> Via then
+      if CmdHash[ID] = Hash then
+      begin
+        CmdTick[ID] := -1;
+        Result := CmdHandled[ID];
+        Exit;
+      end;
   Result := RunCommand(ID, Command, SRC_COMMAND, Admin);
   CmdTick[ID] := Tick;
-  CmdLength[ID] := Length(Command);
+  CmdHash[ID] := Hash;
+  CmdVia[ID] := Via;
   CmdHandled[ID] := Result;
 end;
 
@@ -988,14 +1162,6 @@ end;
 function GuardOn(Flag: Integer): Boolean;
 begin
   Result := ((IgFlags and IG_ENABLED) <> 0) and ((IgFlags and Flag) <> 0) and not GuardBusy;
-end;
-
-procedure SnapScores();
-var
-  t: Integer;
-begin
-  for t := TEAM_ALPHA to TEAM_DELTA do
-    ScoreOk[t] := Game.Teams[t].Score;
 end;
 
 procedure ReportIntegrity(Slot, Kind, Team, Value, Extra: Integer; Text: string);
@@ -1065,17 +1231,32 @@ begin
 end;
 
 { Every tick: what changed the scores since the last look? A point without an opposing team, or a
-  survival round point without anybody dying for it, is taken back. }
-procedure GuardTick();
+  survival round point without anybody dying for it, is taken back. Only the teams that can score
+  in the game style are read, every score once; what the guard leaves of a score that rose is the
+  new ScoreOk (read again only then). Off, the guard reads nothing; turned on, it first notes the
+  scores. }
+procedure GuardTick(Tick: Integer);
 var
-  t, Tick: Integer;
+  t, Score: Integer;
   Solo: Boolean;
 begin
   if (IgFlags and IG_ENABLED) = 0 then
+  begin
+    GuardWasOff := True;
     Exit;
-  Tick := Game.TickCount;
-  for t := TEAM_ALPHA to TEAM_DELTA do
-    if Game.Teams[t].Score > ScoreOk[t] then
+  end;
+  if GuardWasOff then
+  begin
+    GuardWasOff := False;
+    SnapScores();
+    Exit;
+  end;
+  for t := TEAM_ALPHA to ScoreTeams do
+  begin
+    Score := Game.Teams[t].Score;
+    if Score <= ScoreOk[t] then
+      ScoreOk[t] := Score
+    else
     begin
       { ScriptCore evaluates both sides of "and": the players are counted only when the guard
         needs them }
@@ -1093,7 +1274,9 @@ begin
         if TakeBackPoint(t, IGE_JOINSCORE, 0, 0) then
           Announce('A round point that nobody played for was taken back.');
       end;
+      ScoreOk[t] := Game.Teams[t].Score;
     end;
+  end;
 end;
 
 { after a map change the server leaves players who were dead lying dead; they are put back on
@@ -1269,6 +1452,67 @@ begin
     Map.NextMap();
 end;
 
+{ [Bridges] once a second: the next soldier not found in the server's memory yet is looked for (most
+  are found when they join or respawn) }
+procedure BindNext();
+var
+  k, i: Integer;
+  P: TActivePlayer;
+begin
+  for k := 1 to 32 do
+  begin
+    BindSlot := BindSlot + 1;
+    if BindSlot > 32 then
+      BindSlot := 1;
+    i := BindSlot;
+    if InGame[i] then
+      if not Bound[i] then
+      begin
+        P := Players[i];
+        if P.Active then
+          if ZS_Bind(i, P, P.X, P.Y) = 1 then
+            Bound[i] := True;
+        Exit;
+      end;
+  end;
+end;
+
+{ [Bridges] once a second: the next soldier's record against his properties. A difference switches
+  the reading off for good: the script reads the properties again, as before. }
+procedure CheckMemory();
+var
+  k, i, State, Keys, R: Integer;
+  P: TActivePlayer;
+begin
+  for k := 1 to 32 do
+  begin
+    CheckSlot := CheckSlot + 1;
+    if CheckSlot > 32 then
+      CheckSlot := 1;
+    i := CheckSlot;
+    if Bound[i] then
+      if InGame[i] then
+      begin
+        P := Players[i];
+        if not P.Active then
+          Exit;
+        State := BoolInt(P.Alive) + BoolInt(P.OnGround) * 2 + BoolInt(P.IsProne) * 4 + BoolInt(P.Flagger) * 8;
+        { the keys in the record's order: left, right, up, crouch, fire, jetpack, grenade, change, throw,
+          reload, prone, flag throw }
+        Keys := BoolInt(P.KeyLeft) + BoolInt(P.KeyRight) * 2 + BoolInt(P.KeyUp) * 4 + BoolInt(P.KeyCrouch) * 8 +
+          BoolInt(P.KeyShoot) * 16 + BoolInt(P.KeyJetpack) * 32 + BoolInt(P.KeyGrenade) * 64 +
+          BoolInt(P.KeyChangeWeap) * 128 + BoolInt(P.KeyThrow) * 256 + BoolInt(P.KeyReload) * 512 +
+          BoolInt(P.KeyProne) * 1024 + BoolInt(P.KeyFlagThrow) * 2048;
+        R := ZS_Check(i, State, P.Primary.WType, P.Primary.Ammo, P.Secondary.WType, P.Secondary.Ammo, P.Grenades,
+          P.Jets, P.Team, Keys, P.X, P.Y, P.Health, P.Vest);
+        if R = 0 then
+          WriteLn('[ZitroStats] The server''s memory is not read any more (/zs_perf tells why); the script reads ' +
+            'the players itself again.');
+        Exit;
+      end;
+  end;
+end;
+
 { ---------------- event handlers ---------------- }
 
 procedure SendMapBefore();
@@ -1288,11 +1532,32 @@ begin
     Game.TimeLeft, Game.ScoreLimit, Tick);
 end;
 
+{ Admin rights change while a player plays (Basic-Extended gives its Steam admins theirs, /adm,
+  remote.txt): once a second the rights of the humans are compared with what the library heard last,
+  so its notices to the admins follow them. One property read per human. }
+procedure CheckAdmins();
+var
+  k, i, A: Integer;
+begin
+  for k := 1 to HumanCount do
+  begin
+    i := HumanList[k];
+    A := BoolInt(Players[i].IsAdmin);
+    if A <> AdminSent[i] then
+    begin
+      AdminSent[i] := A;
+      ZS_Ev_Admin(i, AdminToken(A = 1));
+    end;
+  end;
+end;
+
 procedure HandleClock(Ticks: Integer);
 var
-  i, Tick: Integer;
+  i, k, Tick, Mask, Rest, Changed, Style: Integer;
 begin
   Tick := Game.TickCount;
+  { [Bridges]: the bullets of the last tick, and the humans the library reads itself }
+  Mask := ZS_Frame(Tick);
   ClockTicks := ClockTicks + 1;
   { nothing of these spans a tick: a handler that was cut short leaves nothing behind }
   GuardBusy := False;
@@ -1305,17 +1570,39 @@ begin
       MoveTeam[i] := -1;
     end;
   end;
-  GuardTick();
+  { the score guard notes the scores of this tick itself }
+  GuardTick(Tick);
   if MapBeforeWaiting then
     SendMapBefore();
-  SnapScores();
   CheckLostMapChange(Tick);
   if JoinFixes > 0 then
     FixJoinSpawns(Tick);
-  for i := 1 to 32 do
-    if HumanSlot[i] then
-      if Players[i].Active then
-        TrackPlayer(Players[i], Tick);
+  { a human the library starts or stops reading starts afresh in TrackPlayer (and a kit counts from
+    his health of the next tick) }
+  if Mask <> FollowMask then
+  begin
+    Changed := Mask xor FollowMask;
+    FollowMask := Mask;
+    for k := 1 to HumanCount do
+    begin
+      i := HumanList[k];
+      if (Changed shr (i - 1)) and 1 <> 0 then
+      begin
+        LastWeapon[i] := -1;
+        LastHealth[i] := -1;
+      end;
+    end;
+  end;
+  { the humans the library does not read follow through their properties }
+  Rest := HumanMask and not Mask;
+  if Rest <> 0 then
+    for k := 1 to HumanCount do
+    begin
+      i := HumanList[k];
+      if (Rest shr (i - 1)) and 1 <> 0 then
+        if Players[i].Active then
+          TrackPlayer(Players[i], Tick);
+    end;
   if ThrowsWaiting > 0 then
     ConfirmThrows(Tick);
   { the map vote: the list an admin changed, and the vote percent once Soldat's own vote is over }
@@ -1329,13 +1616,19 @@ begin
     CheckVotePercent(Tick);
   if ClockTicks mod TICKS_PER_SECOND = 0 then
   begin
+    Style := Game.GameStyle;
     ZS_Ev_Tick(Tick, Game.Teams[1].Score, Game.Teams[2].Score, Game.Teams[3].Score, Game.Teams[4].Score,
-      Game.TimeLeft, Game.GameStyle);
+      Game.TimeLeft, Style, BoolInt(Game.Paused));
+    NoteStyle(Style);
     CheckRealistic(Tick);
-    for i := 1 to 32 do
-      if HumanSlot[i] then
-        SendHeal(i, Tick);
+    for k := 1 to HumanCount do
+      SendHeal(HumanList[k], Tick);
+    CheckAdmins();
     CheckMapList();
+    BridgeBits := ZS_Bridges();
+    BindNext();
+    if BridgeBits and BR_MEMORY <> 0 then
+      CheckMemory();
   end;
   if (ClockTicks mod FLAG_REPORT_TICKS = 0) and (Tick - MapChangeTick > MAP_SETTLE_TICKS) then
     ReportFlagBases(Tick);
@@ -1387,6 +1680,7 @@ var
 begin
   ID := Player.ID;
   HumanSlot[ID] := False;
+  NoteHumans();
   InGame[ID] := False;
   JoinFixTeam[ID] := 0;
   PauseNote[ID] := False;
@@ -1412,6 +1706,14 @@ var
   ID, Old, Answer: Integer;
 begin
   Result := Team;
+  { survival kills a player who enters a team right after this handler, with a hit of his own
+    (HandleDamage): noted for everybody, bots too, whatever the answer below }
+  if Player <> nil then
+  begin
+    ID := Player.ID;
+    if (ID >= 1) and (ID <= 32) then
+      JoinTick[ID] := Game.TickCount;
+  end;
   if not Started then
     Exit;
   ID := 0;
@@ -1509,7 +1811,11 @@ var
 begin
   ID := Player.ID;
   RespawnTick[ID] := Game.TickCount;
-  if not Player.Human then
+  if not Bound[ID] then
+    if InGame[ID] then
+      if ZS_Bind(ID, Player, Player.X, Player.Y) = 1 then
+        Bound[ID] := True;
+  if not HumanSlot[ID] then
     Exit;
   LastWeapon[ID] := -1;
   { the health is full now; kits count from the next tick on, when TrackPlayer has read it }
@@ -1521,19 +1827,21 @@ procedure HandleWeaponChange(Player: TActivePlayer; Primary, Secondary: TPlayerW
 var
   ID: Integer;
 begin
-  if not Player.Human then
-    Exit;
   ID := Player.ID;
-  { a knife leaving the hands of a living player without a new weapon may be a throw }
+  if not HumanSlot[ID] then
+    Exit;
+  { a knife leaving the hands of a living player without a new weapon may be a throw; with the hook
+    in CreateBullet the library sees the thrown knife itself }
   if Player.Alive and (Player.Primary.WType = WEP_KNIFE) and (Primary.WType = WEP_NONE) and
      (Secondary.WType <> WEP_KNIFE) then
-  begin
-    ThrowWaiting[ID] := True;
-    ThrowTick[ID] := Game.TickCount;
-    ThrowX[ID] := Player.X;
-    ThrowY[ID] := Player.Y;
-    ThrowsWaiting := ThrowsWaiting + 1;
-  end;
+    if ZS_Bridges() and BR_HOOK = 0 then
+    begin
+      ThrowWaiting[ID] := True;
+      ThrowTick[ID] := Game.TickCount;
+      ThrowX[ID] := Player.X;
+      ThrowY[ID] := Player.Y;
+      ThrowsWaiting := ThrowsWaiting + 1;
+    end;
   ZS_Ev_Weapon(ID, Primary.WType, Secondary.WType, Primary.Ammo, Secondary.Ammo, Game.TickCount);
   if LastWeapon[ID] >= 0 then
   begin
@@ -1546,10 +1854,13 @@ procedure HandleKitPickup(Player: TActivePlayer; Kit: TActiveMapObject);
 var
   ID, Style: Integer;
 begin
-  if not Player.Human then
-    Exit;
   ID := Player.ID;
+  if not HumanSlot[ID] then
+    Exit;
   Style := Kit.Style;
+  { [Bridges]: the library read the health itself and counted what the kit gave }
+  if ZS_Ev_Kit(ID, Style, Game.TickCount) = 1 then
+    Exit;
   { a medical, berserker or predator kit fills the health up before this handler runs; what it
     added is the difference to the health of the previous tick }
   if (Style = KIT_MEDICAL) or (Style = KIT_BERSERK) or (Style = KIT_PREDATOR) then
@@ -1560,53 +1871,54 @@ begin
         HealKits[ID] := HealKits[ID] + 1;
         LastHealth[ID] := Player.Health;
       end;
-  ZS_Ev_Kit(ID, Style, Game.TickCount);
 end;
 
 procedure HandleKill(Killer, Victim: TActivePlayer; BulletId: Byte);
 var
-  Weapon, Flags, VID, Tick: Integer;
-  Valid, Ray, ServerKill: Boolean;
+  Weapon, Flags, KID, VID, Tick, Br, Rays: Integer;
+  Valid, ServerKill, Alive: Boolean;
   BX, BY: Single;
   B: TActiveMapBullet;
 begin
+  KID := Killer.ID;
   VID := Victim.ID;
   Tick := Game.TickCount;
   { survival: the server kills players itself when a round ends or somebody joins a team
     (HandleDamage), and kills again the player whose respawn it refuses (HandleRespawn) }
   ServerKill := False;
-  if Killer.ID = VID then
+  if KID = VID then
     if (ServerKillTick[VID] = Tick) or (RespawnTick[VID] = Tick) then
       ServerKill := True;
   if not ServerKill then
     LastRealDeath := Tick;
-  if not (Killer.Human or Victim.Human) then
+  if not (HumanSlot[KID] or HumanSlot[VID]) then
     Exit;
-  Weapon := BulletWeapon(BulletId, Killer, Valid);
-  Flags := PoseFlags(Killer, EF_A_FLAGGER, EF_A_PRONE, EF_A_ONGROUND, EF_A_CROUCH) or
-    PoseFlags(Victim, EF_B_FLAGGER, EF_B_PRONE, EF_B_ONGROUND, EF_B_CROUCH);
-  if Killer.Alive then
-  begin
-    Flags := Flags or EF_A_ALIVE;
-    if not RayCalibrated then
-      if not RayTried then
-        CalibrateRayCast(Killer.X, Killer.Y);
-  end;
+  Flags := 0;
   if ServerKill then
-    Flags := Flags or EF_SERVER_KILL;
-  { Could the killer still see the victim when the victim died (Cover (live))? Map.RayCast answers
-    with the real map geometry, which the library has no other way of knowing. The line from where
-    the shot was fired is checked later, when the library asks for it (AnswerRay). }
-  if RayCalibrated then
-    Flags := Flags or EF_RAY_CAL;
-  if Killer.ID <> Victim.ID then
+    Flags := EF_SERVER_KILL;
+  { [Bridges]: the library reads the rest itself (and casts the rays of Cover on the map's walls) }
+  Rays := -1;
+  Br := ZS_Bridges();
+  if Br and BR_MEMORY <> 0 then
   begin
-    Ray := Map.RayCast(Killer.X, Killer.Y, Victim.X, Victim.Y, False, False, True, False, 0);
-    if Ray then
-      Flags := Flags or EF_RAY_RAW;
-    if Ray = RayClearIsTrue then
-      Flags := Flags or EF_LOS;
+    if Br and BR_MAPWALLS = 0 then
+    begin
+      Rays := RayFlags(Killer, Victim, Killer.Alive);
+      Flags := Flags or Rays;
+    end;
+    if ZS_Ev_Death(KID, VID, BulletId, Flags, Tick) = 1 then
+      Exit;
   end;
+  Weapon := BulletWeapon(BulletId, Killer, Valid);
+  Flags := Flags or PoseFlags(Killer, EF_A_FLAGGER, EF_A_PRONE, EF_A_ONGROUND, EF_A_CROUCH) or
+    PoseFlags(Victim, EF_B_FLAGGER, EF_B_PRONE, EF_B_ONGROUND, EF_B_CROUCH);
+  Alive := Killer.Alive;
+  if Alive then
+    Flags := Flags or EF_A_ALIVE;
+  { the line from where the shot was fired is checked later, when the library asks for it
+    (AnswerRay) }
+  if Rays < 0 then
+    Flags := Flags or RayFlags(Killer, Victim, Alive);
   BX := 0;
   BY := 0;
   if Valid then
@@ -1616,14 +1928,14 @@ begin
     BX := B.X;
     BY := B.Y;
   end;
-  ZS_Ev_Kill(Killer.ID, Victim.ID, BulletId, Weapon, Flags, Victim.Primary.WType, Game.TickCount,
+  ZS_Ev_Kill(KID, VID, BulletId, Weapon, Flags, Victim.Primary.WType, Tick,
     Killer.X, Killer.Y, Victim.X, Victim.Y, BX, BY, Victim.Vest);
 end;
 
 function HandleDamage(Shooter, Victim: TActivePlayer; Damage: Single; BulletId: Byte): Single;
 var
-  Weapon, Flags, VID: Integer;
-  Valid: Boolean;
+  Weapon, Flags, SID, VID: Integer;
+  Valid, ServerHit: Boolean;
   Heal, Room, BX, BY, BVX, BVY: Single;
   B: TActiveMapBullet;
 begin
@@ -1633,7 +1945,7 @@ begin
     only what fits is counted; it is added up and sent once a second. }
   if Damage < 0 then
   begin
-    if Victim.Human then
+    if HumanSlot[Victim.ID] then
     begin
       Heal := -Damage;
       Room := FullHealth() - Victim.Health;
@@ -1654,17 +1966,28 @@ begin
     Exit;
   end;
   { survival kills players with a hit of 4000 of their own (1000 through a vest) when a round ends
-    or somebody joins a team; that is the server's doing and no damage of the player. A player
+    (no bullet) or somebody joins a team (the tick of OnBeforeJoin); that is the server's doing and
+    no damage of the player. The same hit from a script (Player.Damage) is a real death. A player
     who connects is hit with 150 instead, before OnJoin: a self-hit of somebody who is not in the
     game yet is the server's as well. Survival is asked about self-hits only. }
-  if Shooter.ID = VID then
+  SID := Shooter.ID;
+  if SID = VID then
     if Game.Survival then
-      if (Damage > SERVER_HIT_DAMAGE) or (Damage = SERVER_HIT_VEST) or not InGame[VID] then
+    begin
+      ServerHit := not InGame[VID];
+      if (Damage > SERVER_HIT_DAMAGE) or (Damage = SERVER_HIT_VEST) then
+        if (BulletId = SERVER_HIT_BULLET) or (JoinTick[VID] = Game.TickCount) then
+          ServerHit := True;
+      if ServerHit then
       begin
         ServerKillTick[VID] := Game.TickCount;
         Exit;
       end;
-  if not (Shooter.Human or Victim.Human) then
+    end;
+  if not (HumanSlot[SID] or HumanSlot[VID]) then
+    Exit;
+  { [Bridges]: the library reads the rest itself }
+  if ZS_Ev_Hit(SID, VID, BulletId, Game.TickCount, Damage) = 1 then
     Exit;
   Weapon := BulletWeapon(BulletId, Shooter, Valid);
   Flags := PoseFlags(Shooter, EF_A_FLAGGER, EF_A_PRONE, EF_A_ONGROUND, EF_A_CROUCH) or
@@ -1686,7 +2009,7 @@ begin
   end;
   { the velocities (pixels a tick): how fast the one who was hit moved, and the shooter's share of
     his bullet's speed, for the flight of a shot the library did not see (a bot's) }
-  ZS_Ev_Damage(Shooter.ID, Victim.ID, BulletId, Weapon, Flags, Game.TickCount, Damage, Victim.Vest,
+  ZS_Ev_Damage(SID, VID, BulletId, Weapon, Flags, Game.TickCount, Damage, Victim.Vest,
     BX, BY, BVX, BVY, Victim.X, Victim.Y, Victim.Health, Victim.VelX, Victim.VelY, Shooter.VelX, Shooter.VelY);
 end;
 
@@ -1829,7 +2152,7 @@ begin
     Result := True;
     Exit;
   end;
-  Result := PlayerCommand(Player, Command, BoolInt(Player.IsAdmin));
+  Result := PlayerCommand(Player, Command, BoolInt(Player.IsAdmin), CMD_VIA_COMMAND);
 end;
 
 { /setteam1 5 moves player 5 to Alpha through OnBeforeJoin; the balance lets it pass }
@@ -1867,7 +2190,7 @@ begin
   if Player = nil then
     Result := RunCommand(0, Command, SRC_CONSOLE, 1)
   else
-    Result := PlayerCommand(Player, Command, 1);
+    Result := PlayerCommand(Player, Command, 1, CMD_VIA_ADMIN);
 end;
 
 { The server announces a map change a few seconds before it happens. The library hears about it on
@@ -1904,11 +2227,12 @@ begin
   ScriptErrors := 0;
   { a map where the calibration did not work gets one try of its own }
   RayTried := False;
-  SendMapAfter(NewMap);
+  SendMapAfter(NewMap, 0);
   { the map vote: the list moves on with Map.NextMap, and a vote percent of 200 that nobody puts
     back goes back }
   SendMapList(MAPLIST_MAPCHANGE);
   NoteStuckVotePercent();
+  NoteStyle(Game.GameStyle);
   SnapScores();
   { survival leaves players who were dead at the map change lying dead on the new map }
   if GuardOn(IG_RESPAWN) then
@@ -1924,6 +2248,53 @@ begin
   if ScriptErrors <= SCRIPT_ERRORS_SHOWN then
     WriteLn('[ZitroStats] script error in ' + FunctionName + ' (' + UnitName + ' ' + IntToStr(Row) + ':' +
       IntToStr(Col) + '): ' + Message);
+end;
+
+{ The library did not start (ZS_Init refused it) and main.pas stays off - but the commands that
+  carry a password are still taken: the server then neither runs them nor writes them, password and
+  all, to its console log. The player hears why on the next tick. }
+function HandleCommandDown(Player: TActivePlayer; Command: string): Boolean;
+var
+  S: string;
+  Sp, ID: Integer;
+begin
+  Result := False;
+  S := LowerCase(Trim(Command));
+  Sp := Pos(' ', S);
+  if Sp > 0 then
+    S := Copy(S, 1, Sp - 1);
+  { S[1] is read only once S has a character }
+  if Length(S) > 0 then
+    if (S[1] = '/') or (S[1] = '!') then
+      Delete(S, 1, 1);
+  if Length(S) = 0 then
+    Exit;
+  if Pos(' ' + S + ' ', DOWN_COMMANDS) = 0 then
+    Exit;
+  Result := True;
+  ID := Player.ID;
+  if (ID >= 1) and (ID <= 32) then
+    if not DownNote[ID] then
+    begin
+      DownNote[ID] := True;
+      DownNotes := DownNotes + 1;
+    end;
+end;
+
+procedure HandleClockDown(Ticks: Integer);
+var
+  i: Integer;
+begin
+  if DownNotes = 0 then
+    Exit;
+  DownNotes := 0;
+  for i := 1 to 32 do
+    if DownNote[i] then
+    begin
+      DownNote[i] := False;
+      if Players[i].Active then
+        Players[i].WriteConsole(DOWN_NOTE, CLR_GUARD);
+    end;
 end;
 
 procedure Startup();
@@ -1945,7 +2316,8 @@ begin
     HealKit[i] := 0;
     HealKits[i] := 0;
     CmdTick[i] := -1;
-    CmdLength[i] := 0;
+    CmdHash[i] := 0;
+    CmdVia[i] := 0;
     CmdHandled[i] := False;
     ThrowWaiting[i] := False;
     MoveTeam[i] := -1;
@@ -1953,13 +2325,24 @@ begin
     AdminTeamTick[i] := -1;
     Resurrect[i] := False;
     ServerKillTick[i] := -1;
+    JoinTick[i] := -1;
     RespawnTick[i] := -1;
     JoinFixTeam[i] := 0;
     JoinFixTick[i] := 0;
     PauseNote[i] := False;
     HumanSlot[i] := False;
     InGame[i] := False;
+    Bound[i] := False;
+    AdminSent[i] := 0;
   end;
+  BridgeBits := 0;
+  BindSlot := 0;
+  CheckSlot := 0;
+  HumanCount := 0;
+  HumanMask := 0;
+  FollowMask := 0;
+  GuardWasOff := True;
+  NoteStyle(Game.GameStyle);
   JoinFixes := 0;
   PauseNotes := 0;
   Announces := 0;
@@ -1993,6 +2376,15 @@ begin
   begin
     WriteLn('[ZitroStats] ERROR: zitrostats_dll could not be started (code ' + IntToStr(Version) +
       '). main.pas and the library must come from the same release. Statistics are disabled.');
+    { only the account commands are still taken (no call of the library) }
+    for i := 1 to 32 do
+    begin
+      DownNote[i] := False;
+      Players[i].OnCommand := @HandleCommandDown;
+    end;
+    DownNotes := 0;
+    Script.OnUnhandledException := @HandleScriptError;
+    Game.OnClockTick := @HandleClockDown;
     Exit;
   end;
   Started := True;
@@ -2037,7 +2429,7 @@ begin
 
   { the script can be loaded or recompiled in the middle of a map }
   if Game.CurrentMap <> '' then
-    SendMapAfter(Game.CurrentMap);
+    SendMapAfter(Game.CurrentMap, MF_RUNNING);
   for i := 1 to 32 do
     if Players[i].Active then
       SendJoin(Players[i]);
@@ -2046,7 +2438,7 @@ begin
 
   Game.TickThreshold := 1;
   Game.OnClockTick := @HandleClock;
-  WriteLn('[ZitroStats] 5.5 started, loading data in the background.');
+  WriteLn('[ZitroStats] 5.7 started, loading data in the background.');
 end;
 
 initialization

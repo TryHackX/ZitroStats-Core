@@ -196,9 +196,14 @@ type
     procedure MergeAccount(SrcId, DstId: LongInt; Remote: Boolean);
     { the shared database gave a new account of this server another number }
     procedure RenumberAccount(OldId, NewId: LongInt);
-    { the records of accounts that have not played for Days days (or are not there any more) go;
-      returns how many }
-    function Prune(Days: LongInt; NowT: Double; LastPlayed: TPMLastPlayedFunc): LongInt;
+    { the records of accounts that have not played for Days days (or are not there any more) go
+      (0 = none of these); with MapDays > 0 also the records of a map the account has not played on
+      for MapDays days, and the rival entries not fought for MapDays days of the records that stay;
+      returns how many records }
+    function Prune(Days, MapDays: LongInt; NowT: Double; LastPlayed: TPMLastPlayedFunc): LongInt;
+    { what the records take in memory, roughly: the records with their lists and texts, not the
+      indexes of the table (/zs_status) }
+    function ApproxBytes: Int64;
 
     procedure FlushJournal(W: TStoreWriter);
     function PendingRemovals: Boolean;
@@ -1401,30 +1406,68 @@ begin
   end;
 end;
 
-function TPlayerMapTable.Prune(Days: LongInt; NowT: Double; LastPlayed: TPMLastPlayedFunc): LongInt;
+function TPlayerMapTable.Prune(Days, MapDays: LongInt; NowT: Double; LastPlayed: TPMLastPlayedFunc): LongInt;
 var
-  i: LongInt;
+  i, k, n: LongInt;
   T: Double;
   L: TIntArray;
+  R: PPlayerMapStats;
 begin
   Result := 0;
-  if (Days <= 0) or not Assigned(LastPlayed) then
+  if ((Days <= 0) and (MapDays <= 0)) or not Assigned(LastPlayed) then
     Exit;
   L := nil;
   for i := 0 to FCount - 1 do
     if FRecs[i] <> nil then
     begin
-      T := LastPlayed(FRecs[i]^.AccountId);
-      if (T <= 0) or (NowT - T > Days) then
+      R := FRecs[i];
+      T := LastPlayed(R^.AccountId);
+      { a player who stays keeps a record per map he ever played on, and every rival he ever met,
+        unless MapDays > 0: then the maps he left and the rivals he no longer meets go as well }
+      if ((Days > 0) and ((T <= 0) or (NowT - T > Days))) or
+        ((MapDays > 0) and (R^.LastPlayed > 0) and (NowT - R^.LastPlayed > MapDays)) then
       begin
         if Result >= Length(L) then
           SetLength(L, Result * 2 + 64);
         L[Result] := i;
         Inc(Result);
+      end
+      else if MapDays > 0 then
+      begin
+        n := 0;
+        for k := 0 to High(R^.Rivals) do
+          if (R^.Rivals[k].LastFight <= 0) or (NowT - R^.Rivals[k].LastFight <= MapDays) then
+          begin
+            if n <> k then
+              R^.Rivals[n] := R^.Rivals[k];
+            Inc(n);
+          end;
+        if n < Length(R^.Rivals) then
+        begin
+          SetLength(R^.Rivals, n);
+          Touch(i);
+        end;
       end;
     end;
   SetLength(L, Result);
   RemovePlaces(L);
+end;
+
+function TPlayerMapTable.ApproxBytes: Int64;
+var
+  i: LongInt;
+  R: PPlayerMapStats;
+begin
+  Result := 0;
+  for i := 0 to FCount - 1 do
+  begin
+    R := FRecs[i];
+    if R = nil then
+      Continue;
+    Result := Result + SizeOf(TPlayerMapStats) + Length(R^.MapName) + Length(R^.SyncBase) +
+      Int64(Length(R^.Weapons)) * SizeOf(TPMWeapon) + Int64(Length(R^.Rivals)) * SizeOf(TPMRival) +
+      Int64(Length(R^.Matchups)) * SizeOf(TPMMatchup) + Int64(Length(R^.Heat)) * SizeOf(THeatCell);
+  end;
 end;
 
 procedure TPlayerMapTable.FlushJournal(W: TStoreWriter);

@@ -8,8 +8,8 @@ uses
   SysUtils, Classes;
 
 const
-  ZS_VERSION_STR = '5.5';
-  ZS_API_VERSION = 15;
+  ZS_VERSION_STR = '5.7';
+  ZS_API_VERSION = 17;
   ZS_DB_FORMAT = 9;
 
   MAX_PLAYERS = 32;
@@ -213,6 +213,12 @@ const
   EF_RAY_RAW = 8192;      { what Map.RayCast answered, before the calibration (debug) }
   EF_RAY_CAL = 16384;     { main.pas has settled which answer means a clear line (debug) }
   EF_SERVER_KILL = 32768; { the server killed the player itself (survival round end or a team change) }
+  { [Bridges]: what the library read from the server's memory for the event (5.6) }
+  EF_ORIGIN = 65536;      { the bullet's origin: where (damage F13/F14, kill F7/F8) and when (I4) it was fired }
+  EF_ZONE = 131072;       { damage I3 = the zone the bullet hit, from the victim's skeleton (HZ_*) }
+  EF_POINTS = 262144;     { kill: the killer's eyes (F9/F10), the victim's head, chest and hips (F11-F16) }
+  EF_MEMORY = 524288;     { the event was read from memory (main.pas sent only the ids) }
+  EF_SCRIPT_BULLET = 1048576; { the hook did not see this bullet made: a script's (no shot of the player) }
 
   { The palette. Every one of these is a setting ([Colors] in settings.ini); the numbers
     here are what a server gets without a file. They are read through the functions in
@@ -289,6 +295,17 @@ type
     TTKSumTicks: Int64;
     TTKCount: LongInt;
     VestKills: LongInt;
+    { [Bridges] (5.6): the hits on enemies and the kills with the weapon, measured from where and when
+      their bullet was made: the distances of the hits (metres) added up and their number, the longest
+      hit, the ticks the bullets of the hits and of the kills flew and their numbers - two numbers make
+      an average, whatever the number of shots }
+    HitDistSum: Double;
+    HitDistCount: LongInt;
+    LongestHit: Single;
+    HitAirTicks: Int64;
+    HitAirCount: LongInt;
+    KillAirTicks: Int64;
+    KillAirCount: LongInt;
   end;
   TWeaponsArray = array[0..WSLOT_COUNT - 1] of TWeaponStats;
   PWeaponStats = ^TWeaponStats;
@@ -641,6 +658,26 @@ type
     SelfkillsUnderFire: LongInt; { own selfkills within AssistSeconds of an enemy hit }
     BalanceMoves: LongInt;     { moved to the other team by the team balance }
     BalanceVolunteers: LongInt; { switched to the weaker team with !switch when it helped }
+    { [Bridges] (5.6): what the server's memory and its bullets tell }
+    CollateralKills: LongInt;  { a second (third...) victim of one bullet }
+    BackKills: LongInt;        { the victim faced away from where the lethal shot came from }
+    BackDeaths: LongInt;       { killed by a shot from behind }
+    LongestHeadshotM: Single;  { metres, the longest kill with a hit in the head }
+    LongestFlightKill: Single; { seconds the lethal bullet flew, the longest }
+    { the shots fired and their hits on enemies by how the shooter stood when he fired:
+      POSTURE_STAND, POSTURE_CROUCH, POSTURE_PRONE, POSTURE_AIR }
+    StanceShots: array[0..3] of LongInt;
+    StanceHits: array[0..3] of LongInt;
+    { the hits on enemies and the kills measured from where and when their bullet was made (the
+      weapons have the same): metres of the hits and their number, the longest hit, the ticks the
+      bullets of the hits and of the kills flew and their numbers }
+    HitDistSum: Double;
+    HitDistCount: Int64;
+    LongestHitM: Single;
+    HitAirTicks: Int64;
+    HitAirCount: Int64;
+    KillAirTicks: Int64;
+    KillAirCount: Int64;
     { health got back: from regenerating polygons (the healing fields of RSCS maps) and from
       medical, berserker and predator kits, and how many kits that was }
     HealRegen: Double;
@@ -781,6 +818,14 @@ type
     RoundsMapChange: LongInt;
     { team games: the kills made by the players of each team, the kill balance of the map }
     KillsByTeam: array[1..4] of LongInt;
+    { [Bridges] (5.6): the hits on enemies and the kills made here, measured from where and when their
+      bullet was made, as the accounts' own: the hits' metres added up and their number, the longest
+      hit, the ticks the bullets of the hits and of the kills flew and their numbers }
+    HitDistSum: Double;
+    HitDistCount: Int64;
+    LongestHit: Single;
+    HitAirTicks, HitAirCount: Int64;
+    KillAirTicks, KillAirCount: Int64;
     { the weapon matchups of the map ([Matrix]): kills made with one weapon against another }
     Matchups: TMatchupCellArray;
     Dirty: Boolean;
@@ -807,6 +852,13 @@ type
     Headshots: LongInt;
     Damage: Double;           { dealt to enemies }
     TimeUsed: LongInt;        { seconds alive with it in hand }
+    { [Bridges] (5.6): its hits on enemies and kills here measured from where and when their bullet
+      was made, as the account's weapon has them }
+    HitDistSum: Double;
+    HitDistCount: LongInt;
+    LongestHit: Single;
+    HitAirTicks, HitAirCount: LongInt;
+    KillAirTicks, KillAirCount: LongInt;
   end;
   PPMWeapon = ^TPMWeapon;
   TPMWeaponArray = array of TPMWeapon;
@@ -909,6 +961,14 @@ type
     ForcedSelfkills: LongInt; { enemies who killed themselves under this player's fire }
     SelfkillsUnderFire: LongInt;
     BaseDefenseKills, BaseAttackKills: LongInt;
+    { [Bridges] (5.6) }
+    CollateralKills, BackKills, BackDeaths: LongInt;
+    StanceShots, StanceHits: array[0..3] of LongInt;
+    HitDistSum: Double;        { metres of the hits whose bullet's origin is known (HitDistCount) }
+    HitDistCount: Int64;
+    LongestHit: Single;        { the longest of them: a best the engine counts by name }
+    HitAirTicks, HitAirCount: Int64;   { the ticks the bullets of those hits flew }
+    KillAirTicks, KillAirCount: Int64; { the ticks the lethal bullets flew }
     { the multi-kill medals }
     DoubleKills, TripleKills, MultiKills, MultiKillsX2, SerialKills, InsaneKills, GimmeMore, MastaKilla,
       StopIt: LongInt;
@@ -1041,7 +1101,7 @@ type
     zeShot, zeGrenade, zeKnifeThrow, zeWeapon, zeKit, zeFlag, zeSample, zeTick,
     zeMapBefore, zeMapAfter, zePlayerScore, zeVote, zeCommand, zeAuthResult, zeMailResult,
     zeReloadConfig, zeShutdown, zeRay, zeTeamRequest, zeMoveResult, zeIntegrity, zeAmmo, zeRealistic, zeHeal,
-    zeMapList);
+    zeMapList, zeBullet, zeLife, zeBridge, zeAdmin);
 
 const
   { the tags of IO jobs somebody waits for }
@@ -1058,7 +1118,7 @@ type
     Serial: LongWord;
     Serial2: LongWord;
     I: array[0..7] of LongInt;
-    F: array[0..15] of Single;
+    F: array[0..19] of Single;
     S1, S2, S3, S4: AnsiString;
   end;
   TZSEventArray = array of TZSEvent;

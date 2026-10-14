@@ -322,6 +322,44 @@ begin
     FieldIs(ProfileFields, 430, @P1, @P1.HealKits, fkDouble, mkSum, True) and
     FieldIs(ProfileFields, 431, @P1, @P1.HealKitCount, fkInt32, mkSum, True));
   Check('healing field of the map (245)', FieldIs(MapFields, 245, @M1, @M1.HealRegen, fkDouble, mkSum, True));
+  Check('the hits'' distance and air time of the map (274-280): sums added up, the longest hit the larger',
+    FieldIs(MapFields, 274, @M1, @M1.HitDistSum, fkDouble, mkSum, True) and
+    FieldIs(MapFields, 275, @M1, @M1.HitDistCount, fkInt64, mkSum, True) and
+    FieldIs(MapFields, 276, @M1, @M1.LongestHit, fkSingle, mkMax, True) and
+    FieldIs(MapFields, 277, @M1, @M1.HitAirTicks, fkInt64, mkSum, True) and
+    FieldIs(MapFields, 278, @M1, @M1.HitAirCount, fkInt64, mkSum, True) and
+    FieldIs(MapFields, 279, @M1, @M1.KillAirTicks, fkInt64, mkSum, True) and
+    FieldIs(MapFields, 280, @M1, @M1.KillAirCount, fkInt64, mkSum, True));
+  { [Bridges] (5.6) }
+  Ok := FieldIs(ProfileFields, 432, @P1, @P1.CollateralKills, fkInt32, mkSum, True) and
+    FieldIs(ProfileFields, 433, @P1, @P1.BackKills, fkInt32, mkSum, True) and
+    FieldIs(ProfileFields, 434, @P1, @P1.BackDeaths, fkInt32, mkSum, True) and
+    FieldIs(ProfileFields, 435, @P1, @P1.LongestHeadshotM, fkSingle, mkMax, True) and
+    FieldIs(ProfileFields, 436, @P1, @P1.LongestFlightKill, fkSingle, mkMax, True);
+  for i := 0 to 3 do
+    if not (FieldIs(ProfileFields, 437 + i, @P1, @P1.StanceShots[i], fkInt32, mkSum, True) and
+      FieldIs(ProfileFields, 441 + i, @P1, @P1.StanceHits[i], fkInt32, mkSum, True)) then
+      Ok := False;
+  Check('what the server is read for (432-444): counters added up on a merge, the longest headshot and bullet ' +
+    'flight the larger, all cleared by a reset', Ok);
+  Ok := FieldIs(ProfileFields, 445, @P1, @P1.HitDistSum, fkDouble, mkSum, True) and
+    FieldIs(ProfileFields, 446, @P1, @P1.HitDistCount, fkInt64, mkSum, True) and
+    FieldIs(ProfileFields, 447, @P1, @P1.LongestHitM, fkSingle, mkMax, True) and
+    FieldIs(ProfileFields, 448, @P1, @P1.HitAirTicks, fkInt64, mkSum, True) and
+    FieldIs(ProfileFields, 449, @P1, @P1.HitAirCount, fkInt64, mkSum, True) and
+    FieldIs(ProfileFields, 450, @P1, @P1.KillAirTicks, fkInt64, mkSum, True) and
+    FieldIs(ProfileFields, 451, @P1, @P1.KillAirCount, fkInt64, mkSum, True);
+  for i := 0 to WSLOT_COUNT - 1 do
+    if not (FieldIs(ProfileFields, 4000 + i * 16, @P1, @P1.Weapons[i].HitDistSum, fkDouble, mkSum, True) and
+      FieldIs(ProfileFields, 4001 + i * 16, @P1, @P1.Weapons[i].HitDistCount, fkInt32, mkSum, True) and
+      FieldIs(ProfileFields, 4002 + i * 16, @P1, @P1.Weapons[i].LongestHit, fkSingle, mkMax, True) and
+      FieldIs(ProfileFields, 4003 + i * 16, @P1, @P1.Weapons[i].HitAirTicks, fkInt64, mkSum, True) and
+      FieldIs(ProfileFields, 4004 + i * 16, @P1, @P1.Weapons[i].HitAirCount, fkInt32, mkSum, True) and
+      FieldIs(ProfileFields, 4005 + i * 16, @P1, @P1.Weapons[i].KillAirTicks, fkInt64, mkSum, True) and
+      FieldIs(ProfileFields, 4006 + i * 16, @P1, @P1.Weapons[i].KillAirCount, fkInt32, mkSum, True)) then
+      Ok := False;
+  Check('the hits'' distance and air time and the kills'' air time (445-451, every weapon 4000 + slot * 16 + 0-6): ' +
+    'sums and counts added up on a merge, the longest hit the larger, all cleared by a reset', Ok);
   Ok := True;
   for i := 1 to SPREE_MAX_KILLS do
     if not FieldIs(ProfileFields, 600 + i, @P1, @P1.SpreeLives[i], fkInt32, mkSum, True) then

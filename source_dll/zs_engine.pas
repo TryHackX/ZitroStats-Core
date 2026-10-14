@@ -20,16 +20,27 @@ interface
 uses
   zs_fight,
   SysUtils, Classes, Math, zs_types, zs_util, zs_config, zs_fields, zs_fileio, zs_store, zs_legacy,
-  zs_db, zs_rank, zs_rating, zs_weapons, zs_live, zs_rules, zs_service, zs_identity, zs_balance, zs_maps;
+  zs_db, zs_rank, zs_rating, zs_weapons, zs_live, zs_rules, zs_service, zs_identity, zs_balance, zs_maps, zs_geo;
 
 const
   MF_SURVIVAL = 1;
   MF_REALISTIC = 2;
   MF_ADVANCE = 4;
   MF_FRIENDLYFIRE = 8;
+  { the script started in the middle of the map (a /recompile): the match goes on }
+  MF_RUNNING = 16;
 
   EVENT_LIMIT = 100000;
+  { ZS_Shutdown waits on the game thread while the engine applies what was queued before it; a
+    backlog it would wait longer for is dropped }
+  STOP_DRAIN_MS = 3000;
+  { text waiting for the game thread (console lines, big texts, broadcasts, server console lines):
+    in all, and for one player; a player whose answers wait above SLOT_TEXT_WAIT lines gets a new
+    command answered once they are on their way. What controls the game (kicks, moves, the map, the
+    settings of the script) always goes in. }
   ACTION_LIMIT = 20000;
+  SLOT_TEXT_LIMIT = 1000;
+  SLOT_TEXT_WAIT = 300;
   { the event array the game thread fills is handed back empty; one that grew past this during a
     backlog goes back to the memory manager instead }
   EVENT_SPARE_MAX = 16384;
@@ -50,15 +61,26 @@ const
   PACE_RAY_STREAM = MAX_PLAYERS + 2;
   PACE_STREAMS = MAX_PLAYERS + 3;
   HUD_EVENTS_MAX = 4;
+  { errors.log takes this many lines of one place and kind of error a minute, then one line that
+    says how many more there were }
+  ERROR_LOG_LINES = 10;
+  ERROR_KEYS_MAX = 32;
   { lines /zs_suspects keeps: the daily scan (NoteSuspect) and the kill series (LogSuspicious) }
   SUSPECTS_MAX = 200;
   SNAPSHOT_BUDGET = 400;
   SNAPSHOT_IO_HIGH_WATER = 8 * 1024 * 1024;
 
+  { the tick counter of the server starts again at 0 after 2147483640 ticks (about 414 days): a tick
+    this far behind the last one is the counter starting again }
+  TICK_WRAP_GAP = 1000000000;
+
   { a map change this soon after a map vote started is the vote's result }
   VOTE_PASS_TICKS = 60 * TICKS_PER_SECOND;
   { who is still on the server this long into the next map stayed after the map }
   STAY_CHECK_TICKS = 120 * TICKS_PER_SECOND;
+  { the seconds a player spends on a name go to the account this often (and at the leave and the
+    shutdown), so a crash loses a few minutes of them at most }
+  NAME_TIME_FLUSH_SECONDS = 300;
 
   SNAP_ROUTINE = 1;
   SNAP_BACKUP = 2;
@@ -99,6 +121,7 @@ type
     CmdWindowMs: Int64;
     CmdCount: LongInt;
     HeavyUntilMs: Int64;
+    SearchUntilMs: Int64;        { the next name searched in every account or page of such a list (zs_commands) }
     PlaySeconds: LongInt;
     SpecSeconds: LongInt;
     Kicked: Boolean;
@@ -170,6 +193,7 @@ type
     StartTime: Double;
     TeamScore: array[1..4] of LongInt;
     ScoreTick: LongInt;         { tick of the last look at the team scores (EvTick): a point seen now came after it }
+    ScoreKnown: Boolean;        { False in a match the script started in (MF_RUNNING) until EvTick read the scores }
     MaxDeficit: array[1..4] of LongInt;
     TimeLeft: LongInt;
     FirstBlood: Boolean;
@@ -220,6 +244,7 @@ type
     MoveAfter: Double;         { imbalance expected after }
     MoveBy: LongInt;           { admin slot of /move, /swap, /mix; 0 = console }
     MoveHelped: Boolean;       { a !switch that evened the match }
+    SwitchUntil: LongInt;      { the next !switch of the player not before this tick (BAL_SWITCH_GAP) }
     WaitTeam: LongInt;         { survival: an admin's move that waits for this player's death, 0 = none }
     WaitBy: LongInt;
     JoinNote: AnsiString;
@@ -271,6 +296,7 @@ type
     Team: LongInt;
     Power: Double;
     Counts: Boolean;
+    Human: Boolean;
     LockTeam: LongInt;
     Locked: Boolean;
   end;
@@ -284,6 +310,7 @@ type
     Params: TBalParams;
     Tolerance: Double;
     MaxSpread: LongInt;
+    MinPlayers: LongInt;
     Players: array[1..MAX_PLAYERS] of TBalSnapPlayer;
     Expected: TBalExpectedArray;
     SeenId: LongInt;
@@ -346,6 +373,7 @@ type
     FActions: TZSActionArray;
     FActionCount: LongInt;
     FActionRead: LongInt;
+    FSlotText: array[0..MAX_PLAYERS] of LongInt;   { console lines and big texts waiting for each player }
     FEventSpare: TZSEventArray;
     { what PopAction may still hand out in this tick; BeginActions opens the tick }
     FPaceOn: Boolean;
@@ -360,11 +388,15 @@ type
     FPaceHeld: array[0..PACE_STREAMS] of Boolean;
     FLibraryPath: AnsiString;
     FStopping: Boolean;
+    FStopMs: Int64;                 { when Shutdown asked the engine to stop }
     FReady: Boolean;
     FReadOnly: Boolean;
     FLastFlushMs: Int64;
     FLastSharedFlushMs: Int64;
     FLastSnapshotMs: Int64;
+    FSnapshotAgeMs: Int64;          { how old the snapshot read at the start was (its header's date) }
+    FBackupStamp: AnsiString;       { the second of the last backup name, and how many got it }
+    FBackupSeq: LongInt;
     FLastSecondMs: Int64;
     FLastInfoMs: Int64;
     FSnapTag: LongInt;
@@ -372,11 +404,15 @@ type
     FSnapRetryMs: Int64;
     FErrorWindowMs: Int64;
     FErrorCount: LongInt;
+    { errors.log in the running minute: the lines of each place and kind of error (ReportError) }
+    FErrorKeys: array of AnsiString;
+    FErrorKeyCounts: array of LongInt;
     FPeakSince: Double;
     FYesLockUntil: Double;
     FProcessed: LongInt;
     FBackupInFlight: Boolean;
     FLoadFailed: Boolean;           { the stored database could not be read }
+    FLoadAborted: Boolean;          { the shutdown came during the load: nothing of it is written or sent }
     FLibraryNoted: Boolean;
     FMaxGen: LongWord;
     FToken: LongInt;
@@ -385,6 +421,7 @@ type
     FRayNext: LongInt;
     FRayId: LongInt;
     FMapSerial: LongInt;
+    FPausedSince: LongInt;          { /pause: the tick of the first second seen paused, 0 = the game runs }
     FStay: TStayCheck;
     FIntegritySent: Boolean;
     FBalLock: TRTLCriticalSection;
@@ -393,8 +430,25 @@ type
     FJoinReqId: LongInt;
     FLoadMs: Int64;                 { how long loading the data took (the notice of a /recompile) }
     FScriptKept: Boolean;           { main.pas was loaded again while the library kept running }
+    { [Bridges] (5.6): the map's walls for the rays, and what the game thread said it reads }
+    FGeo: TGeoMap;
+    FGeoResult: LongInt;            { what loading the map file gave (polygons, or GEO_*) }
+    FBrHook: Boolean;               { every bullet comes from the hook: the ammunition counts no shots }
+    FBrMem: Boolean;                { the soldiers are read from memory: the bots' lives are known }
+    FBrState: LongInt;              { the hooks and the reading as last told (bits 1, 2, 4), -1 = not yet }
+    { the zones of the skeleton compared with the zones the damage tells (weapons whose three
+      modifiers differ): the same, different (/zs_perf) }
+    FZoneSame: Int64;
+    FZoneDiff: Int64;
+    FGeoRays: Int64;                { Cover rays the engine cast itself }
+    { the accounts and points of the players online before an admin operation or a new season
+      changed them (NoteSessionPoints, KeepSessionPoints) }
+    FPointsId: array[1..MAX_PLAYERS] of LongInt;
+    FPointsBefore: array[1..MAX_PLAYERS] of LongInt;
     procedure Run;
+    function RunQueued: LongInt;
     procedure LoadData;
+    function StopLoading: Boolean;
     procedure ArchiveDamagedFiles;
     function AutoRestoreBackup: Boolean;
     function ApiTryLock: Boolean;
@@ -406,10 +460,11 @@ type
     procedure PersistenceTimers(NowMs: Int64);
     procedure PollResults;
     procedure FinishShutdown;
-    procedure EmitAction(const A: TZSAction);
+    function EmitAction(const A: TZSAction): Boolean;
     function PaceStream(const A: TZSAction): LongInt;
     function PaceAllows(const A: TZSAction; Stream: LongInt): Boolean;
     procedure ReportError(const Where: AnsiString; E: Exception);
+    procedure ErrorSummary;
     function CheckDuplicate(S: LongInt; const What, Mode: AnsiString; Kind: LongInt; const Value: AnsiString): Boolean;
     procedure NoteSuspect(const Text: AnsiString; Notify: Boolean = True);
     procedure ScanForSuspects;
@@ -420,6 +475,7 @@ type
     procedure EvLeave(var E: TZSEvent);
     procedure EvTeam(var E: TZSEvent);
     procedure EvSteamAuth(var E: TZSEvent);
+    procedure EvAdmin(var E: TZSEvent);
     procedure EvSpawn(var E: TZSEvent);
     procedure EvShot(var E: TZSEvent);
     procedure EvGrenade(var E: TZSEvent);
@@ -429,7 +485,13 @@ type
     procedure EvHeal(var E: TZSEvent);
     procedure EvSample(var E: TZSEvent);
     procedure EvVote(var E: TZSEvent);
-    procedure CountShots(Slot, Weapon, Count: LongInt);
+    procedure CountShots(Slot, Weapon, Count: LongInt; Bullets: Boolean = False);
+    { [Bridges]: zs_engine_events.inc }
+    procedure EvBullet(var E: TZSEvent);
+    procedure EvLife(var E: TZSEvent);
+    procedure EvBridge(var E: TZSEvent);
+    procedure GeoLoad(const MapName: AnsiString);
+    function GeoRay(X1, Y1, X2, Y2: Single; Team: LongInt): LongInt;
     procedure NotePick(S, Which, Weapon: LongInt);
 
     { reloads: zs_engine_reload.inc }
@@ -467,6 +529,7 @@ type
 
     { match flow: zs_engine_match.inc }
     procedure EvTick(var E: TZSEvent);
+    procedure ShiftTicks(Delta: LongInt; Wrap: Boolean);
     procedure EvMapBefore(var E: TZSEvent);
     procedure EvMapAfter(var E: TZSEvent);
     procedure EvPlayerScore(var E: TZSEvent);
@@ -479,6 +542,7 @@ type
     procedure RoundCheck(ServerWinner: LongInt);
     procedure RoundSettle;
     procedure SecondAccounting;
+    procedure NoteNameTime(S: LongInt);
     procedure UpdatePeakOnline;
     function DailyEntry: LongInt;
     function MatchTeamOf(Slot: LongInt): LongInt;
@@ -546,7 +610,8 @@ type
     procedure EvReloadConfig(var E: TZSEvent);
     function AdminCommand(Slot: LongInt; const W: TStringArray; Source: LongInt): Boolean;
     procedure Confirm(Slot: LongInt; const W: TStringArray; Source: LongInt);
-    procedure AskConfirmation(Slot, Kind: LongInt; const Arg: AnsiString; IntArg, IntArg2: LongInt; const What: AnsiString);
+    procedure AskConfirmation(Slot, Kind: LongInt; const Arg: AnsiString; IntArg, IntArg2: LongInt; const What: AnsiString;
+      const Note: AnsiString = '');
     procedure RunPendingOp;
     procedure ClearPending;
     procedure RestoreBackup(const FileName: AnsiString; AdminSlot: LongInt);
@@ -636,6 +701,9 @@ type
     property EventsDropped: LongInt read FEventsDropped;
     property EventsQueued: LongInt read FEventCount;
     procedure PushEvent(const E: TZSEvent);
+    { /zs_perf: the bridges as the game thread last saw them, the map's walls, the zones (lines
+      separated by #10) }
+    function BridgeReport: AnsiString;
     function BeginActions: LongInt;
     function PopAction(out A: TZSAction): Boolean;
     { set before Start: the engine thread reads and hashes the file }
@@ -648,6 +716,10 @@ type
     procedure KickPlayer(Slot: LongInt; const Reason: AnsiString); override;
     function SubmitJob(const Job: TServiceJob): Boolean; override;
     procedure SessionProfileChanged(Slot, OldProfileId, NewProfileId: LongInt); override;
+    { around a change of the points of accounts online that is no play (a reset, a merge, a new
+      season): what it gave or took is no gain of the session or the match }
+    procedure NoteSessionPoints;
+    procedure KeepSessionPoints;
 
     procedure Say(Slot: LongInt; const Text: AnsiString; Color: LongInt);
     procedure Broadcast(const Text: AnsiString; Color: LongInt);
@@ -682,7 +754,7 @@ type
     function ApiPlayerRank(Slot: LongInt): LongInt;
     function ApiPlayerName(Slot: LongInt): AnsiString;
     function ApiTopPlayer(Rank: LongInt): AnsiString;
-    function ApiTopPlayerWait(Rank: LongInt): AnsiString;
+    function ApiTopPlayerWait(Rank: LongInt; WithHwid: Boolean = False): AnsiString;
     function ApiProfileCount: LongInt;
     function ApiServerPeak: LongInt;
     function ApiPlayerHud(Slot: LongInt): Boolean;
@@ -742,7 +814,7 @@ function NewAction(Kind, Slot, Color: LongInt; const Text: AnsiString): TZSActio
 implementation
 
 uses
-  zs_commands, zs_export, zs_crash, zs_mysql, zs_sqldb, zs_matrix;
+  zs_commands, zs_export, zs_crash, zs_mysql, zs_sqldb, zs_matrix, zs_bridge;
 
 function NewEvent(Kind: TZSEventKind): TZSEvent;
 begin
@@ -831,6 +903,9 @@ begin
   Cfg.ScriptDir := ScriptDir;
   DB := TStatsDB.Create;
   Identity := TIdentityManager.Create(DB, @Cfg, Self);
+  FGeo := TGeoMap.Create;
+  FGeoResult := GEO_NO_FILE;
+  FBrState := -1;
   for i := 1 to MAX_PLAYERS do
     LiveResetSlot(Live, i);
   Pending.Kind := OP_NONE;
@@ -848,6 +923,7 @@ begin
   Shutdown;
   { stops the thread that reads the maps folder }
   FreeAndNil(MapCat);
+  FreeAndNil(FGeo);
   Identity.Free;
   DB.Free;
   Suspects.Free;
@@ -882,6 +958,7 @@ procedure TZSEngine.Shutdown;
 begin
   if FThread = nil then
     Exit;
+  FStopMs := MonoMs;
   FStopping := True;
   RTLEventSetEvent(FEventWake);
   FThread.WaitFor;
@@ -956,6 +1033,19 @@ begin
     DB.HideAfterDays := 0;
   { ZS_Command reads this on the game thread: whether /votemap is the map vote's }
   MapVoteSlash := Ord(Cfg.MapVoteEnabled and (Cfg.MapVoteCommands and MVC_SLASHVOTEMAP <> 0));
+  { [Bridges]: ZS_Frame reads these on the game thread and puts the hook in or takes it out }
+  BridgeWantHook := Ord(Cfg.BridgeHook);
+  BridgeWantMemory := Ord(Cfg.BridgeMemory);
+  { MapGeometry switched off: no map; switched on in the middle of a map: the map of now }
+  if not Cfg.BridgeGeometry then
+  begin
+    if FGeo <> nil then
+      FGeo.Clear;
+    FGeoResult := GEO_NO_FILE;
+    BridgeGeoReady := 0;
+  end
+  else if (FGeo <> nil) and not FGeo.Loaded and (Match.MapName <> '') then
+    GeoLoad(Match.MapName);
   { [Matrix] MaxRivals: a smaller limit shortens a rival list when it takes a new rival }
   DB.PM.MaxRivals := Cfg.MatrixMaxRivals;
 end;
@@ -974,10 +1064,71 @@ begin
   Result.TimeoutSeconds := Cfg.MailTimeoutSeconds;
 end;
 
-procedure TZSEngine.Run;
+{ Takes everything the game thread has queued and applies it, one event at a time under the state
+  lock; returns how many events it took. After Shutdown asked to stop, a rest that would keep the
+  game thread waiting longer than STOP_DRAIN_MS is dropped. }
+function TZSEngine.RunQueued: LongInt;
 var
   Batch: TZSEventArray;
-  Count, i: LongInt;
+  Count, i, k: LongInt;
+  T0: Int64;
+begin
+  { the game thread gets an empty array with room at once, so it never allocates }
+  EnterCriticalSection(FEventLock);
+  Batch := FEvents;
+  Count := FEventCount;
+  FEvents := FEventSpare;
+  FEventSpare := nil;
+  FEventCount := 0;
+  LeaveCriticalSection(FEventLock);
+  Result := Count;
+
+  if Count > PerfBatchMax then
+    PerfBatchMax := Count;
+  for i := 0 to Count - 1 do
+  begin
+    if FStopping and (MonoMs - FStopMs > STOP_DRAIN_MS) then
+    begin
+      Inc(FEventsDropped, Count - i);
+      for k := i to Count - 1 do
+        if Batch[k].Kind = zeCommand then
+          WipeString(Batch[k].S1);
+      Break;
+    end;
+    EnterCriticalSection(StateLock);
+    try
+      T0 := MicroNow;
+      try
+        ProcessEvent(Batch[i]);
+      except
+        on Ex: Exception do
+          ReportError('event ' + IntToStr(Ord(Batch[i].Kind)), Ex);
+      end;
+      T0 := MicroNow - T0;
+      Inc(PerfEvents);
+      Inc(PerfEventMicros, T0);
+      if T0 > PerfEventMaxMicros then
+        PerfEventMaxMicros := T0;
+    finally
+      LeaveCriticalSection(StateLock);
+    end;
+    Inc(FProcessed);
+    { command texts may carry passwords }
+    if Batch[i].Kind = zeCommand then
+      WipeString(Batch[i].S1);
+    Batch[i].S1 := '';
+    Batch[i].S2 := '';
+    Batch[i].S3 := '';
+    Batch[i].S4 := '';
+  end;
+  { the emptied array is the next one the game thread fills }
+  if Length(Batch) <= EVENT_SPARE_MAX then
+    FEventSpare := Batch;
+  Batch := nil;
+end;
+
+procedure TZSEngine.Run;
+var
   T0: Int64;
 begin
   try
@@ -1001,62 +1152,24 @@ begin
     end;
   end;
   { the library file is read and hashed here, not on the game thread }
-  try
-    NoteLibrary(FLibraryPath);
-  except
-  end;
+  if not FLoadAborted then
+    try
+      NoteLibrary(FLibraryPath);
+    except
+    end;
   FReady := True;
   FLastFlushMs := MonoMs;
   FLastSharedFlushMs := FLastFlushMs;
-  FLastSnapshotMs := FLastFlushMs;
+  { the time to the next routine snapshot goes on from the snapshot that was read, so frequent
+    restarts and recompiles do not put it off again and again }
+  FLastSnapshotMs := FLastFlushMs - FSnapshotAgeMs;
   FLastInfoMs := FLastFlushMs;
 
-  while True do
+  { a load the shutdown stopped goes straight to the end: its events are of no use }
+  while not FLoadAborted do
   begin
     RTLEventWaitFor(FEventWake, 50);
-    { the game thread gets an empty array with room at once, so it never allocates }
-    EnterCriticalSection(FEventLock);
-    Batch := FEvents;
-    Count := FEventCount;
-    FEvents := FEventSpare;
-    FEventSpare := nil;
-    FEventCount := 0;
-    LeaveCriticalSection(FEventLock);
-
-    if Count > PerfBatchMax then
-      PerfBatchMax := Count;
-    for i := 0 to Count - 1 do
-    begin
-      EnterCriticalSection(StateLock);
-      try
-        T0 := MicroNow;
-        try
-          ProcessEvent(Batch[i]);
-        except
-          on Ex: Exception do
-            ReportError('event ' + IntToStr(Ord(Batch[i].Kind)), Ex);
-        end;
-        T0 := MicroNow - T0;
-        Inc(PerfEvents);
-        Inc(PerfEventMicros, T0);
-        if T0 > PerfEventMaxMicros then
-          PerfEventMaxMicros := T0;
-      finally
-        LeaveCriticalSection(StateLock);
-      end;
-      Inc(FProcessed);
-      { command texts may carry passwords }
-      if Batch[i].Kind = zeCommand then
-        WipeString(Batch[i].S1);
-      Batch[i].S1 := '';
-      Batch[i].S2 := '';
-      Batch[i].S3 := '';
-      Batch[i].S4 := '';
-    end;
-    { the emptied array is the next one the game thread fills }
-    if Length(Batch) <= EVENT_SPARE_MAX then
-      FEventSpare := Batch;
-    Batch := nil;
+    RunQueued;
 
     EnterCriticalSection(StateLock);
     try
@@ -1086,14 +1199,25 @@ begin
     if FStopping then
       Break;
   end;
+  { what the game thread queued while the last events or the timers ran: ZS_Shutdown waits for it }
+  while not FLoadAborted and (RunQueued > 0) and (MonoMs - FStopMs <= STOP_DRAIN_MS) do ;
   FinishShutdown;
 end;
 
 procedure TZSEngine.FinishShutdown;
+var
+  S: LongInt;
 begin
   EnterCriticalSection(StateLock);
   try
     try
+      { a load the shutdown stopped (FLoadAborted) is read-only: nothing of it goes to the journal,
+        and it never started the exchange with MySQL or the mirror }
+      { the seconds on the names of the players still here (a leave writes them for the others) }
+      if not FReadOnly then
+        for S := 1 to MAX_PLAYERS do
+          if Live[S].Active and Live[S].Human then
+            NoteNameTime(S);
       { the last changes into the shared database (Engine = mysql), a few seconds at most }
       if SqlState <> nil then
         SqlShutdown(Self);
@@ -1113,12 +1237,24 @@ begin
       end;
     except
       on Ex: Exception do
+      begin
         ReportError('shutdown', Ex);
+        { One more try before the writer goes: the journal leaves in portions, so it needs little
+          memory, and what the first try did not hand over is still marked or in the buffer. }
+        if (Writer <> nil) and not FReadOnly then
+          try
+            DB.FlushJournal(Writer, True);
+          except
+            on Ex2: Exception do
+              ReportError('shutdown, second try', Ex2);
+          end;
+      end;
     end;
   finally
     LeaveCriticalSection(StateLock);
   end;
   MirrorShutdown(Self);
+  ErrorSummary;
   if IO <> nil then
     IO.StopAndWait;
   FreeAndNil(Writer);
@@ -1130,6 +1266,20 @@ end;
 
 { ---------------- loading ---------------- }
 
+{ ZS_Shutdown came while the data loads (a /recompile in the first seconds after the start): the load
+  stops between its steps, and what it read so far is never written or sent anywhere - the engine is
+  read-only from here on. }
+function TZSEngine.StopLoading: Boolean;
+begin
+  Result := FStopping;
+  if Result and not FLoadAborted then
+  begin
+    FLoadAborted := True;
+    FReadOnly := True;
+    LoadMessage := 'loading was stopped by the shutdown';
+  end;
+end;
+
 procedure TZSEngine.LoadData;
 var
   St: TStoreState;
@@ -1139,6 +1289,8 @@ var
   k: LongInt;
   Migrated: Boolean;
 begin
+  if StopLoading then
+    Exit;
   EnsureDir(DataDir);
   if LogDir <> '' then
     EnsureDir(LogDir);
@@ -1162,6 +1314,8 @@ begin
   finally
     L.Free;
   end;
+  if StopLoading then
+    Exit;
 
   case Res of
     slLoaded:
@@ -1169,9 +1323,15 @@ begin
         DB.TakeState(St);
         WriteServer(Format('[ZitroStats] %d accounts, %d maps loaded (snapshot %d + %d journal records)',
           [DB.LiveProfiles, DB.MapCount, Int64(Info.SnapshotGen), Info.JournalRecords]));
+        { a date more than a day ahead (the clock was wrong when it was written) makes the next
+          routine snapshot due }
+        if Info.SnapshotCreated > Now + 1 then
+          FSnapshotAgeMs := Int64(3650) * 86400000
+        else if Info.SnapshotCreated > 0 then
+          FSnapshotAgeMs := Round(EnsureRange(Now - Info.SnapshotCreated, 0.0, 3650.0) * 86400000.0);
       end;
     slEmpty:
-      if not Info.NewerFormat then
+      if not Info.NewerFormat and not StopLoading then
         Migrated := MigrateLegacy(St);
     slFailed:
       begin
@@ -1180,7 +1340,8 @@ begin
         LoadMessage := 'the database could not be read';
         WriteServer('[ZitroStats] ERROR: the database in ' + DataDir +
           ' could not be read. Statistics are NOT saved until it is repaired or restored.');
-        if Cfg.RestoreOnDamage and (IO.LockError = '') and not Info.NewerFormat and AutoRestoreBackup then
+        if Cfg.RestoreOnDamage and (IO.LockError = '') and not Info.NewerFormat and not StopLoading and
+           AutoRestoreBackup then
         begin
           FReadOnly := False;
           FLoadFailed := False;
@@ -1199,9 +1360,13 @@ begin
       'Statistics are NOT saved: use main.pas and zitrostats_dll of that release.');
   end;
 
+  if StopLoading then
+    Exit;
   if not FReadOnly and (Writer = nil) then
   begin
-    Writer := TStoreWriter.Create(IO, Info.MaxGen);
+    { the journals replayed after the snapshot count towards CompactJournalMB as if this run had
+      written them (their headers aside) }
+    Writer := TStoreWriter.Create(IO, Info.MaxGen, Info.JournalBytes - Int64(Info.JournalFiles) * STORE_HEADER_SIZE);
     if Migrated or (Res = slEmpty) then
     begin
       { store the imported or fresh database before the first change }
@@ -1212,6 +1377,8 @@ begin
   end;
 
   { Engine = mysql: the shared database replaces what the files hold, and the files keep a copy }
+  if StopLoading then
+    Exit;
   if (Cfg.MySQLEngine = MYSQL_SHARED) and not FReadOnly and (Writer <> nil) then
     if SqlStart(Self) then
       StartSnapshot(SNAP_ROUTINE, '');
@@ -1418,7 +1585,9 @@ begin
   Wake := False;
   EnterCriticalSection(FEventLock);
   try
-    if (FEventCount >= EVENT_LIMIT) and not (E.Kind in [zeJoin, zeLeave, zeMapBefore, zeMapAfter, zeShutdown, zeMapList]) then
+    { a backlog this long (a stalled engine) drops the events that come many times a second; the
+      ones that carry a state (teams, Steam, commands, the bridges, the settings ...) always go in }
+    if (FEventCount >= EVENT_LIMIT) and (E.Kind in [zeSample, zeBullet, zeAmmo, zeDamage, zeShot, zeHeal]) then
     begin
       Inc(FEventsDropped);
       Exit;
@@ -1437,15 +1606,26 @@ begin
     RTLEventSetEvent(FEventWake);
 end;
 
-procedure TZSEngine.EmitAction(const A: TZSAction);
+{ False when the action was dropped: text above its limits (ACTION_LIMIT, SLOT_TEXT_LIMIT) }
+function TZSEngine.EmitAction(const A: TZSAction): Boolean;
 var
-  n, i: LongInt;
+  n, i, Own: LongInt;
 begin
   CrashTrail('emit', A.Kind, A.Slot);
+  Result := False;
+  { the player a console line or a big text is for, 0 = none }
+  Own := 0;
+  if (A.Kind in [ACT_CONSOLE, ACT_BIGTEXT]) and (A.Slot >= 1) and (A.Slot <= MAX_PLAYERS) then
+    Own := A.Slot;
   EnterCriticalSection(FActionLock);
   try
-    if FActionCount - FActionRead >= ACTION_LIMIT then
-      Exit;
+    if A.Kind in [ACT_CONSOLE, ACT_BIGTEXT, ACT_BROADCAST, ACT_WRITELN] then
+    begin
+      if FActionCount - FActionRead >= ACTION_LIMIT then
+        Exit;
+      if (Own > 0) and (FSlotText[Own] >= SLOT_TEXT_LIMIT) then
+        Exit;
+    end;
     if FActionCount >= Length(FActions) then
     begin
       { move what is still waiting to the front; the places the paced output already took
@@ -1471,6 +1651,9 @@ begin
     end;
     FActions[FActionCount] := A;
     Inc(FActionCount);
+    if Own > 0 then
+      Inc(FSlotText[Own]);
+    Result := True;
   finally
     LeaveCriticalSection(FActionLock);
   end;
@@ -1541,6 +1724,26 @@ end;
   limits of a tick. Returns how many actions wait, so an empty tick costs one call - and 0 for a
   tick that comes right after the last one (Soldat catching up after a stall). A script that
   never calls it gets every action in order, without limits. }
+function TZSEngine.BridgeReport: AnsiString;
+var
+  G: AnsiString;
+begin
+  Result := BridgeStatus;
+  if not Cfg.BridgeGeometry then
+    G := 'map walls: off ([Bridges] MapGeometry = 0)'
+  else if (FGeo <> nil) and FGeo.Loaded then
+    G := Format('map walls: %s, %d polygons, %d colliders; Cover rays %d', [FGeo.Name, FGeo.Polys, FGeo.Colliders,
+      FGeoRays])
+  else
+    G := Format('map walls: not read (%d) - the script casts the rays', [FGeoResult]);
+  if Result <> '' then
+    Result := Result + #10;
+  Result := Result + G;
+  if FZoneSame + FZoneDiff > 0 then
+    Result := Result + #10 + Format('zones where the damage tells it too: %d the same, %d different', [FZoneSame,
+      FZoneDiff]);
+end;
+
 function TZSEngine.BeginActions: LongInt;
 var
   T: Int64;
@@ -1600,6 +1803,9 @@ begin
         if Result then
         begin
           A := FActions[i];
+          if (A.Kind in [ACT_CONSOLE, ACT_BIGTEXT]) and (A.Slot >= 1) and (A.Slot <= MAX_PLAYERS) and
+             (FSlotText[A.Slot] > 0) then
+            Dec(FSlotText[A.Slot]);
           FActions[i].Kind := ACT_NONE;
           FActions[i].Text := '';
           FPaceScan := i + 1;
@@ -1623,20 +1829,32 @@ begin
 end;
 
 procedure TZSEngine.ProcessEvent(var E: TZSEvent);
+var
+  Old: LongInt;
 begin
   if E.Tick > GameTick then
+    GameTick := E.Tick
+  { the server's tick counter started again at 0 (ZSE1-08): the game time goes on from the new
+    tick, everything that keeps a tick moved along; the tick of every second tells it }
+  else if (E.Kind = zeTick) and (E.Tick < GameTick - TICK_WRAP_GAP) then
+  begin
+    Old := GameTick;
     GameTick := E.Tick;
+    ShiftTicks(E.Tick - Old, True);
+  end;
   DB.SetNow(Now);
   { every death of the tick that decided a survival round is in }
   if Match.RoundPending and (GameTick <> Match.RoundTick) then
     RoundSettle;
-  if not (E.Kind in [zeSample, zeTick, zeShot, zeDamage, zeWeapon, zeGrenade, zeKnifeThrow, zeAmmo, zeHeal]) then
+  if not (E.Kind in [zeSample, zeTick, zeShot, zeDamage, zeWeapon, zeGrenade, zeKnifeThrow, zeAmmo, zeHeal, zeBullet,
+    zeLife]) then
     CrashTrail('event', Ord(E.Kind), E.Slot);
   case E.Kind of
     zeJoin: EvJoin(E);
     zeLeave: EvLeave(E);
     zeTeam: EvTeam(E);
     zeSteamAuth: EvSteamAuth(E);
+    zeAdmin: EvAdmin(E);
     zeSpawn: EvSpawn(E);
     zeKill: EvKill(E);
     zeDamage: EvDamage(E);
@@ -1660,6 +1878,9 @@ begin
     zeMoveResult: EvMoveResult(E);
     zeIntegrity: EvIntegrity(E);
     zeMapList: EvMapList(E);
+    zeBullet: EvBullet(E);
+    zeLife: EvLife(E);
+    zeBridge: EvBridge(E);
     zeCommand: EvCommand(E);
     zeReloadConfig: EvReloadConfig(E);
     zeShutdown: FStopping := True;
@@ -1668,6 +1889,8 @@ end;
 
 { ---------------- timers and persistence ---------------- }
 
+{ Every step on its own: an error that repeats in one of them stops none of the others - the
+  journal (PersistenceTimers) is written whatever happens before it. }
 procedure TZSEngine.Timers;
 var
   NowMs: Int64;
@@ -1677,21 +1900,63 @@ begin
   if NowMs - FLastSecondMs >= 1000 then
   begin
     FLastSecondMs := NowMs;
-    Identity.Tick;
-    WallSecond;
+    try
+      Identity.Tick;
+    except
+      on Ex: Exception do
+        ReportError('timers (identity)', Ex);
+    end;
+    try
+      WallSecond;
+    except
+      on Ex: Exception do
+        ReportError('timers (second)', Ex);
+    end;
+    if (FErrorKeys <> nil) and (NowMs - FErrorWindowMs > 60000) then
+      ErrorSummary;
   end;
-  PollResults;
-  MapVoteTimers(NowMs);
+  try
+    PollResults;
+  except
+    on Ex: Exception do
+      ReportError('timers (results)', Ex);
+  end;
+  try
+    MapVoteTimers(NowMs);
+  except
+    on Ex: Exception do
+      ReportError('timers (map vote)', Ex);
+  end;
   if not FReadOnly and (Writer <> nil) then
-    PersistenceTimers(NowMs);
+    try
+      PersistenceTimers(NowMs);
+    except
+      on Ex: Exception do
+        ReportError('timers (journal)', Ex);
+    end;
   { a read-only engine holds data it may not save; exporting it could overwrite the files of the
     server that owns the data }
   if not FReadOnly then
   begin
-    ExportTick(Self, NowMs);
-    MirrorTick(Self, NowMs);
+    try
+      ExportTick(Self, NowMs);
+    except
+      on Ex: Exception do
+        ReportError('timers (export)', Ex);
+    end;
+    try
+      MirrorTick(Self, NowMs);
+    except
+      on Ex: Exception do
+        ReportError('timers (mirror)', Ex);
+    end;
     if SqlState <> nil then
-      SqlTick(Self, NowMs);
+      try
+        SqlTick(Self, NowMs);
+      except
+        on Ex: Exception do
+          ReportError('timers (mysql)', Ex);
+      end;
   end;
 end;
 
@@ -1757,8 +2022,8 @@ begin
       Line := Line + ')';
     end;
     if Rep.MatrixPruned > 0 then
-      Line := Line + Format('; %d player-on-map records of accounts not seen for %d days removed ([Matrix] MatrixPruneDays)',
-        [Rep.MatrixPruned, Cfg.MatrixPruneDays]);
+      Line := Line + Format('; %d player-on-map records removed ([Matrix] MatrixPruneDays %d, MatrixMapPruneDays %d)',
+        [Rep.MatrixPruned, Cfg.MatrixPruneDays, Cfg.MatrixMapPruneDays]);
     WriteServer('[ZitroStats] ' + Line);
     AppendLog('balance.log', Line);
     if DB.HideAfterDays > 0 then
@@ -1776,11 +2041,19 @@ begin
       begin
         Broadcast(Format('Season %d is over!', [DB.Seasons[Idx].Id]), CLR_HEADER);
         for k := 0 to Min(2, High(DB.Seasons[Idx].Entries)) do
-          Broadcast(Format('  %d. %s  %+d pts', [k + 1, DB.Seasons[Idx].Entries[k].Name,
-            DB.Seasons[Idx].Entries[k].SeasonPoints]), CLR_TOP1);
+        begin
+          { Format of FPC has no "+" flag: it printed the name again instead of the points }
+          Line := IntToStr(DB.Seasons[Idx].Entries[k].SeasonPoints);
+          if DB.Seasons[Idx].Entries[k].SeasonPoints >= 0 then
+            Line := '+' + Line;
+          Broadcast(Format('  %d. %s  %s pts', [k + 1, DB.Seasons[Idx].Entries[k].Name, Line]), CLR_TOP1);
+        end;
       end;
     end;
+    { SeasonPointsReset = soft or hard changes the points of the players online too }
+    NoteSessionPoints;
     StartSeason(DB, Cfg);
+    KeepSessionPoints;
     if Cfg.SeasonBroadcast then
       Broadcast(Format('Season %d has started. Standings: !topseason', [DB.Server.SeasonId]), CLR_SUBHEADER);
   end;
@@ -1807,11 +2080,33 @@ begin
   FSnapBackupPath := BackupPath;
   DB.BeginSnapshot(Writer);
   FLastSnapshotMs := MonoMs;
+  FSnapshotAgeMs := 0;
 end;
 
 function TZSEngine.BackupFileName(const Reason: AnsiString): AnsiString;
+var
+  Stamp: AnsiString;
 begin
-  Result := StorePath(BackupDir, 'zitrostats-' + FormatDateTime('yyyymmdd-hhnnss', Now) + '-' + Reason + '.zsdb');
+  { two backups in one second (two /zs_backup, an automatic and a manual one) get numbers: the file of
+    the first may not be written yet, so the name is told apart here, not on the disk alone }
+  Stamp := FormatDateTime('yyyymmdd-hhnnss', Now);
+  if Stamp = FBackupStamp then
+    Inc(FBackupSeq)
+  else
+  begin
+    FBackupStamp := Stamp;
+    FBackupSeq := 1;
+  end;
+  Result := StorePath(BackupDir, 'zitrostats-' + Stamp + '-' + Reason + '.zsdb');
+  while (FBackupSeq > 1) or FileExists(Result) do
+  begin
+    if FBackupSeq < 2 then
+      FBackupSeq := 2;
+    Result := StorePath(BackupDir, 'zitrostats-' + Stamp + '-' + IntToStr(FBackupSeq) + '-' + Reason + '.zsdb');
+    if not FileExists(Result) then
+      Break;
+    Inc(FBackupSeq);
+  end;
 end;
 
 procedure TZSEngine.PersistenceTimers(NowMs: Int64);
@@ -1836,7 +2131,10 @@ begin
 
   if DB.SnapshotActive or (NowMs < FSnapRetryMs) then
     Exit;
-  if (Cfg.AutoBackupDays > 0) and not FBackupInFlight and (Now - DB.Server.LastAutoBackup >= Cfg.AutoBackupDays) then
+  { a date of the last automatic backup more than a day ahead (the clock was wrong) would stop the
+    backups, and the snapshots they write, for good: a backup is due then }
+  if (Cfg.AutoBackupDays > 0) and not FBackupInFlight and ((Now - DB.Server.LastAutoBackup >= Cfg.AutoBackupDays) or
+     (DB.Server.LastAutoBackup > Now + 1)) then
   begin
     { the date is stored once the IO thread confirms the file; until then no second backup }
     FBackupInFlight := True;
@@ -2089,12 +2387,20 @@ end;
 procedure TZSEngine.AppendLog(const FileName, Line: AnsiString);
 var
   Job: TStoreJob;
+  Text: AnsiString;
+  k: LongInt;
 begin
   if (IO = nil) or (LogDir = '') then
     Exit;
+  { a name or a message with control characters (a line break, ESC) would start a line of its own or
+    drive the terminal that shows the log: each becomes '?', so the fields stay apart }
+  Text := Line;
+  for k := 1 to Length(Text) do
+    if (Text[k] < ' ') or (Text[k] = #127) then
+      Text[k] := '?';
   Job := NewJob(sjAppendText);
   Job.Path := StorePath(LogDir, FileName);
-  Job.Data := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now) + '  ' + Line + LineEnding;
+  Job.Data := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now) + '  ' + Text + LineEnding;
   IO.Enqueue(Job);
 end;
 
@@ -2390,17 +2696,58 @@ end;
 procedure TZSEngine.ReportError(const Where: AnsiString; E: Exception);
 var
   NowMs: Int64;
+  Key: AnsiString;
+  k: LongInt;
 begin
   NowMs := MonoMs;
   if NowMs - FErrorWindowMs > 60000 then
   begin
+    ErrorSummary;
     FErrorWindowMs := NowMs;
     FErrorCount := 0;
   end;
   Inc(FErrorCount);
   if FErrorCount <= 10 then
     WriteServer('[ZitroStats] internal error in ' + Where + ': ' + E.ClassName + ': ' + E.Message);
-  AppendLog('errors.log', Where + ': ' + E.ClassName + ': ' + E.Message);
+  { an error that comes with every event of a kind would write the disk full: errors.log takes the
+    first ERROR_LOG_LINES of each place and kind a minute (ErrorSummary counts the rest) }
+  Key := Where + ': ' + E.ClassName;
+  k := High(FErrorKeys);
+  while (k >= 0) and (FErrorKeys[k] <> Key) do
+    Dec(k);
+  if k < 0 then
+  begin
+    k := Length(FErrorKeys);
+    { more kinds than that in one minute: the last place counts all the others }
+    if k >= ERROR_KEYS_MAX - 1 then
+    begin
+      Key := 'other errors';
+      k := ERROR_KEYS_MAX - 1;
+    end;
+    if k >= Length(FErrorKeys) then
+    begin
+      SetLength(FErrorKeys, k + 1);
+      SetLength(FErrorKeyCounts, k + 1);
+      FErrorKeys[k] := Key;
+      FErrorKeyCounts[k] := 0;
+    end;
+  end;
+  Inc(FErrorKeyCounts[k]);
+  if FErrorKeyCounts[k] <= ERROR_LOG_LINES then
+    AppendLog('errors.log', Where + ': ' + E.ClassName + ': ' + E.Message);
+end;
+
+{ the end of a minute of errors: how many of each kind errors.log did not take }
+procedure TZSEngine.ErrorSummary;
+var
+  k: LongInt;
+begin
+  for k := 0 to High(FErrorKeys) do
+    if FErrorKeyCounts[k] > ERROR_LOG_LINES then
+      AppendLog('errors.log', Format('%s: %d more in the same minute, not written',
+        [FErrorKeys[k], FErrorKeyCounts[k] - ERROR_LOG_LINES]));
+  FErrorKeys := nil;
+  FErrorKeyCounts := nil;
 end;
 
 { ---------------- identity host ---------------- }
@@ -2470,10 +2817,10 @@ end;
 
 procedure TZSEngine.KickPlayer(Slot: LongInt; const Reason: AnsiString);
 begin
-  { the server needs a moment to drop the player: until then the slot counts for nothing }
-  if SlotValid(Slot) then
+  { the server needs a moment to drop the player: until then the slot counts for nothing - once the
+    kick is on its way }
+  if EmitAction(NewAction(ACT_KICK, Slot, 0, Reason)) and SlotValid(Slot) then
     Live[Slot].PendingKick := True;
-  EmitAction(NewAction(ACT_KICK, Slot, 0, Reason));
 end;
 
 function TZSEngine.SubmitJob(const Job: TServiceJob): Boolean;
@@ -2494,6 +2841,43 @@ begin
     Live[Slot].MatchStartPoints := DB.Profiles[Idx]^.Points;
   end;
   Extra[Slot].HudText := '';
+end;
+
+procedure TZSEngine.NoteSessionPoints;
+var
+  S, Idx: LongInt;
+begin
+  for S := 1 to MAX_PLAYERS do
+  begin
+    FPointsId[S] := 0;
+    Idx := Identity.ProfileIndex(S);
+    if SlotValid(S) and DB.Valid(Idx) then
+    begin
+      FPointsId[S] := DB.Profiles[Idx]^.ID;
+      FPointsBefore[S] := DB.Profiles[Idx]^.Points;
+    end;
+  end;
+end;
+
+{ !session and the table of the match show the points won since the start: the start moves by what
+  the change gave or took, the player's own gain stays }
+procedure TZSEngine.KeepSessionPoints;
+var
+  S, Idx, Delta: LongInt;
+begin
+  for S := 1 to MAX_PLAYERS do
+  begin
+    if FPointsId[S] = 0 then
+      Continue;
+    Idx := Identity.ProfileIndex(S);
+    if SlotValid(S) and DB.Valid(Idx) and (DB.Profiles[Idx]^.ID = FPointsId[S]) then
+    begin
+      Delta := DB.Profiles[Idx]^.Points - FPointsBefore[S];
+      Inc(Live[S].SessionStartPoints, Delta);
+      Inc(Live[S].MatchStartPoints, Delta);
+    end;
+    FPointsId[S] := 0;
+  end;
 end;
 
 { ---------------- helpers ---------------- }

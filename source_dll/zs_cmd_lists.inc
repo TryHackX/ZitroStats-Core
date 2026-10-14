@@ -19,7 +19,7 @@ const
   MET_WEAPON_DMG = 1400;
 
   { The position in this table is the metric id used by PlayerMetricValue. }
-  PLAYER_METRICS: array[0..167] of TMetricDef = (
+  PLAYER_METRICS: array[0..180] of TMetricDef = (
     (Aliases: ' points pts point '; Header: 'Points'; Fmt: mfInt; Asc: False),                      { 0 }
     (Aliases: ' rating rate '; Header: 'Rating'; Fmt: mfDec1; Asc: False),
     (Aliases: ' tier division '; Header: 'Tier'; Fmt: mfTier; Asc: False),
@@ -187,7 +187,22 @@ const
     (Aliases: ' berserkkits berserkerkits '; Header: 'BerserkKits'; Fmt: mfInt; Asc: False),
     (Aliases: ' predatorkits '; Header: 'PredatorKits'; Fmt: mfInt; Asc: False),                     { 165 }
     (Aliases: ' flamerkits '; Header: 'FlamerKits'; Fmt: mfInt; Asc: False),                         { 166 }
-    (Aliases: ' roundfirstblood rfb '; Header: 'RndFBlood'; Fmt: mfInt; Asc: False)                  { 167 }
+    (Aliases: ' roundfirstblood rfb '; Header: 'RndFBlood'; Fmt: mfInt; Asc: False),                 { 167 }
+    { [Bridges] (5.6): counted only while the server is read directly }
+    (Aliases: ' collaterals collateral collats '; Header: 'Collats'; Fmt: mfInt; Asc: False),          { 168 }
+    (Aliases: ' backkills backkill '; Header: 'BackKills'; Fmt: mfInt; Asc: False),
+    (Aliases: ' backdeaths backdeath '; Header: 'BackDeaths'; Fmt: mfInt; Asc: False),               { 170 }
+    (Aliases: ' longesths longhs '; Header: 'LongHS'; Fmt: mfMeters; Asc: False),
+    (Aliases: ' longestair longflight '; Header: 'LongFlight'; Fmt: mfSec; Asc: False),
+    (Aliases: ' accstand standacc '; Header: 'AccStand'; Fmt: mfPct; Asc: False),
+    (Aliases: ' acccrouch crouchacc '; Header: 'AccCrouch'; Fmt: mfPct; Asc: False),
+    (Aliases: ' accprone proneacc '; Header: 'AccProne'; Fmt: mfPct; Asc: False),                   { 175 }
+    (Aliases: ' accair airacc '; Header: 'AccAir'; Fmt: mfPct; Asc: False),                          { 176 }
+    { the hits and kills measured from where and when their bullet was made }
+    (Aliases: ' longesthit longhit '; Header: 'LongHit'; Fmt: mfMeters; Asc: False),
+    (Aliases: ' hitdist avghitdist '; Header: 'HitDist'; Fmt: mfMeters; Asc: False),
+    (Aliases: ' hitair avghitair hitflight '; Header: 'HitAir'; Fmt: mfSec; Asc: False),
+    (Aliases: ' killair avgkillair killflight '; Header: 'KillAir'; Fmt: mfSec; Asc: False)             { 180 }
   );
 
 var
@@ -423,6 +438,43 @@ begin
     Result := Pct(A, B);
 end;
 
+const
+  { The least count a share or an average of the lists is made of before they rank it: a 100% of
+    one shot or a hit from 180 m says nothing yet. [Commands] MinSamplePercent scales them. }
+  SAMPLE_SHOTS = 100;
+  SAMPLE_HITS = 50;
+  SAMPLE_EVENTS = 20;
+  SAMPLE_GAMES = 10;
+  SAMPLE_SECONDS = 3600;
+
+{ the least of a count a list ranks (Need of the table, 0 = any), by [Commands] MinSamplePercent }
+function SampleNeed(E: TZSEngine; Need: LongInt): Double;
+begin
+  Result := Need * E.Cfg.MinSamplePercent / 100.0;
+end;
+
+{ "Acc% 100 shots", "Kills/h 1h 0m played": the need of a metric for the note under a list }
+function NeedItem(const Header, What: AnsiString; Need: Double): AnsiString;
+begin
+  if What = 'played' then
+    Result := Header + ' ' + FormatDurationShort(Ceil(Need)) + ' played'
+  else
+    Result := Format('%s %d %s', [Header, Ceil(Need), What]);
+end;
+
+{ under a list that shows "-" for a value made of too few: what each metric needs }
+procedure NeedNote(E: TZSEngine; Slot: LongInt; const Items: TStringArray);
+begin
+  if Length(Items) > 0 then
+    WrapList(E, Slot, '[Note] "-" = too few yet, listed last. Needed: ', Items, CLR_HINT);
+end;
+
+procedure PushNeed(var Items: TStringArray; const Item: AnsiString);
+begin
+  SetLength(Items, Length(Items) + 1);
+  Items[High(Items)] := Item;
+end;
+
 { metric names separated by space, comma or semicolon; a trailing number is the page }
 function MetricTokens(const Query: AnsiString; var Page: LongInt): TStringArray;
 var
@@ -453,21 +505,25 @@ begin
   Result := Tokens;
 end;
 
-function WeaponSuffixId(const T, Sfx: AnsiString; Base: LongInt): LongInt;
+function WeaponSuffixId(const T, Sfx: AnsiString; Base: LongInt; Exact: Boolean = False): LongInt;
 var
   S: LongInt;
 begin
   Result := -1;
   if (Length(T) > Length(Sfx)) and (Copy(T, Length(T) - Length(Sfx) + 1, Length(Sfx)) = Sfx) then
   begin
-    S := WepSlot(ResolveWeapon(Copy(T, 1, Length(T) - Length(Sfx))));
+    if Exact then
+      S := WepSlot(ResolveWeaponExact(Copy(T, 1, Length(T) - Length(Sfx))))
+    else
+      S := WepSlot(ResolveWeapon(Copy(T, 1, Length(T) - Length(Sfx))));
     if S >= 0 then
       Result := Base + S;
   end;
 end;
 
-{ named metrics first, then <weapon>time / acc / hs / dmg, then <weapon> = kills with it }
-function PlayerMetricId(const Token: AnsiString): LongInt;
+{ named metrics first, then <weapon>time / acc / hs / dmg, then <weapon> = kills with it; Exact takes a
+  weapon by a whole word of its names only, not by a beginning, a part or a typo, nor by its number }
+function PlayerMetricId(const Token: AnsiString; Exact: Boolean = False): LongInt;
 var
   T: AnsiString;
 begin
@@ -475,16 +531,21 @@ begin
   Result := MetricIndex(PLAYER_METRICS, T);
   if Result >= 0 then
     Exit;
-  Result := WeaponSuffixId(T, 'time', MET_WEAPON_TIME);
+  Result := WeaponSuffixId(T, 'time', MET_WEAPON_TIME, Exact);
   if Result < 0 then
-    Result := WeaponSuffixId(T, 'acc', MET_WEAPON_ACC);
+    Result := WeaponSuffixId(T, 'acc', MET_WEAPON_ACC, Exact);
   if Result < 0 then
-    Result := WeaponSuffixId(T, 'hs', MET_WEAPON_HS);
+    Result := WeaponSuffixId(T, 'hs', MET_WEAPON_HS, Exact);
   if Result < 0 then
-    Result := WeaponSuffixId(T, 'dmg', MET_WEAPON_DMG);
+    Result := WeaponSuffixId(T, 'dmg', MET_WEAPON_DMG, Exact);
   if Result < 0 then
   begin
-    Result := WepSlot(ResolveWeapon(T));
+    if Exact and AllDigits(T) then
+      Result := -1
+    else if Exact then
+      Result := WepSlot(ResolveWeaponExact(T))
+    else
+      Result := WepSlot(ResolveWeapon(T));
     if Result >= 0 then
       Result := MET_WEAPON_KILLS + Result;
   end;
@@ -762,6 +823,72 @@ begin
     { the kits of one kind, in the order of KIT_KIND_STYLES }
     160..166: Result := P.KitPickups[Id - 160];
     167: Result := P.RoundFirstBloodCount;
+    168: Result := P.CollateralKills;
+    169: Result := P.BackKills;
+    170: Result := P.BackDeaths;
+    171: Result := P.LongestHeadshotM;
+    172: Result := P.LongestFlightKill;
+    { the shots by stance, in the order of POSTURE_* }
+    173..176: Result := Min(100.0, SafeDivD(P.StanceHits[Id - 173] * 100.0, P.StanceShots[Id - 173]));
+    177: Result := P.LongestHitM;
+    178: Result := SafeDivD(P.HitDistSum, P.HitDistCount);
+    179: Result := SafeDivD(P.HitAirTicks, P.HitAirCount) / TICKS_PER_SECOND;
+    180: Result := SafeDivD(P.KillAirTicks, P.KillAirCount) / TICKS_PER_SECOND;
+    else Result := 0;
+  end;
+end;
+
+{ A share or an average of an account is ranked only when made of enough (SampleNeed): the count it
+  needs of PlayerMetricCount, What names it; 0 for the metrics that are no share or average. }
+function PlayerMetricNeed(Id: LongInt; out What: AnsiString): LongInt;
+begin
+  What := '';
+  Result := 0;
+  if (Id >= MET_WEAPON_ACC) and (Id < MET_WEAPON_HS) then
+  begin
+    What := 'shots';
+    Exit(SAMPLE_SHOTS);
+  end;
+  case Id of
+    6, 14: begin What := 'kills+deaths'; Result := SAMPLE_EVENTS; end;
+    11, 119, 173..176: begin What := 'shots'; Result := SAMPLE_SHOTS; end;
+    21: begin What := 'measured kills'; Result := SAMPLE_EVENTS; end;
+    25, 27, 29: begin What := 'hits'; Result := SAMPLE_HITS; end;
+    73: begin What := 'matches'; Result := SAMPLE_GAMES; end;
+    76, 77: begin What := 'rounds'; Result := SAMPLE_GAMES; end;
+    84: begin What := 'lives'; Result := SAMPLE_EVENTS; end;
+    90: begin What := 'played'; Result := SAMPLE_SECONDS; end;
+    102, 107: begin What := 'throws'; Result := SAMPLE_EVENTS; end;
+    113, 116: begin What := 'shots'; Result := SAMPLE_EVENTS; end;
+    135, 180: begin What := 'timed kills'; Result := SAMPLE_EVENTS; end;
+    178: begin What := 'measured hits'; Result := SAMPLE_EVENTS; end;
+    179: begin What := 'timed hits'; Result := SAMPLE_EVENTS; end;
+  end;
+end;
+
+function PlayerMetricCount(const P: TPlayerProfile; Id: LongInt): Double;
+begin
+  if (Id >= MET_WEAPON_ACC) and (Id < MET_WEAPON_HS) then
+    Exit(WeaponView(P, Id - MET_WEAPON_ACC).Shots);
+  case Id of
+    6, 14: Result := Int64(P.Kills) + P.Deaths;
+    11: Result := Max(P.Shots, P.ShotsHits);
+    21: Result := P.KillDistanceCount;
+    25, 27, 29: Result := P.ShotsHits;
+    73: Result := Int64(P.Wins) + P.Loses;
+    76, 77: Result := Int64(P.RoundsWins) + P.RoundsLose;
+    84: Result := LivesEnded(P);
+    90: Result := P.TimePlayed;
+    102: Result := P.KnivesThrows;
+    107: Result := P.NadesThrows;
+    113: Result := P.M79Shots;
+    116: Result := P.M72LAWShots;
+    119: Result := P.FlamethrowerShots;
+    135: Result := P.TTKCount;
+    173..176: Result := P.StanceShots[Id - 173];
+    178: Result := P.HitDistCount;
+    179: Result := P.HitAirCount;
+    180: Result := P.KillAirCount;
     else Result := 0;
   end;
 end;
@@ -782,14 +909,36 @@ begin
     Result := MetricText(PlayerMetricFmt(Id), V);
 end;
 
-function IsPlayerMetricList(const Query: AnsiString): Boolean;
+{ an account below the need of a share or an average (Need from SampleNeed, 0 = none) }
+function PlayerMetricShort(const P: TPlayerProfile; Id: LongInt; Need: Double): Boolean;
+begin
+  Result := (Need > 0) and (PlayerMetricCount(P, Id) < Need);
+end;
+
+{ a text that names at least one metric: only a list of such a text costs a turn of the list limits }
+function HasPlayerMetric(const Query: AnsiString): Boolean;
+var
+  Tokens: TStringArray;
+  Page, k: LongInt;
+begin
+  Page := 1;
+  Tokens := MetricTokens(Query, Page);
+  for k := 0 to High(Tokens) do
+    if PlayerMetricId(Tokens[k]) >= 0 then
+      Exit(True);
+  Result := False;
+end;
+
+{ !top <text>: a list by metrics when its first word names one; with Exact (what !top takes) only by
+  a whole name, so a player called like a weapon ("Frog", "Pika") is no ranking of grenade or saw kills }
+function IsPlayerMetricList(const Query: AnsiString; Exact: Boolean = True): Boolean;
 var
   Tokens: TStringArray;
   Page: LongInt;
 begin
   Page := 1;
   Tokens := MetricTokens(Query, Page);
-  Result := (Length(Tokens) > 0) and (PlayerMetricId(Tokens[0]) >= 0);
+  Result := (Length(Tokens) > 0) and (PlayerMetricId(Tokens[0], Exact) >= 0);
 end;
 
 { the name column and the columns of 2-5 metrics after the 5 of the place: together LINE_W }
@@ -1009,6 +1158,12 @@ begin
     CLR_COMBAT);
   Out(E, Slot, '  nadekits, clusterkits, vestkits, berserkkits, predatorkits, flamerkits', CLR_COMBAT);
   Out(E, Slot, '[Distance & Timing] longkill, barretkill, avgdist, long100, barrettlong, ttk, bestttk, longestlife', CLR_SHOOTING);
+  Out(E, Slot, '[Read from the server] collaterals, backkills, backdeaths, longesths, longestair (bullet flight),',
+    CLR_SHOOTING);
+  Out(E, Slot, '  accstand, acccrouch, accprone, accair (accuracy by how the shooter stood), longesthit,',
+    CLR_SHOOTING);
+  Out(E, Slot, '  hitdist (the hits'' distance), hitair, killair (how long the bullets of hits and kills flew)',
+    CLR_SHOOTING);
   Out(E, Slot, '[Streaks & Feats] maxstreak, streak5, streak10, streak15, streak20, streak25, shutdowns,', CLR_FEATS);
   Out(E, Slot, '  finishers, firstblood, roundfirstblood, firstdmg, laststand, clutches, dom, revenge, posthumous,',
     CLR_FEATS);
@@ -1030,6 +1185,9 @@ begin
   Out(E, Slot, '  friendlyhitsby, statgun = stationary gun hits, fists = punch hits', CLR_TEAMPLAY);
   Footer(E, Slot, LINE_W);
   Out(E, Slot, 'Example: !topby rating;kdr  or  !topby dmg,kills,acc 2', CLR_HINT);
+  if E.Cfg.MinSamplePercent > 0 then
+    Out(E, Slot, Format('A share or an average of too few (acc: %d shots, winrate: %d matches) is "-", listed last.',
+      [Ceil(SampleNeed(E, SAMPLE_SHOTS)), Ceil(SampleNeed(E, SAMPLE_GAMES))]), CLR_HINT);
 end;
 
 procedure ListTopBy(E: TZSEngine; Slot: LongInt; const Query: AnsiString; Page: LongInt);
@@ -1040,15 +1198,30 @@ const
   TIER_W = 16;
   METRIC_W = 14;
 var
-  Tokens, Heads: TStringArray;
+  Tokens, Heads, Needed: TStringArray;
   Ids, Rows: TIntArray;
   Widths: array[0..4] of LongInt;
+  Needs: array[0..4] of Double;
+  Short: array[0..4] of Boolean;
   k, f, n, Pages, First, Last, NameW, Me, Idx: LongInt;
-  Ignored, Canon, Title, Line: AnsiString;
+  Ignored, Canon, Title, Line, What: AnsiString;
   P: PPlayerProfile;
   Tmp: TPlayerProfile;
   Entries: TRankEntryArray;
   ShowTier, ShowPoints, ShowRating, ShowKD, ShowKills: Boolean;
+
+  { the cell of a metric: "-" for an account below its need (Short says the page has one) }
+  function Cell(f: LongInt): AnsiString;
+  begin
+    if PlayerMetricShort(P^, Ids[f], Needs[f]) then
+    begin
+      Short[f] := True;
+      Result := '-';
+    end
+    else
+      Result := PlayerMetricText(E, Ids[f], PlayerMetricValue(E, P^, Ids[f]));
+  end;
+
 begin
   Tokens := MetricTokens(Query, Page);
   Ids := nil;
@@ -1076,9 +1249,16 @@ begin
   begin
     Out(E, Slot, 'No valid metric given.', CLR_BAD);
     if Ignored <> '' then
-      Out(E, Slot, '[Note] Unknown: ' + Ignored, CLR_HINT);
+      Out(E, Slot, '[Note] Unknown: ' + Clip(Ignored, LINE_W - 16), CLR_HINT);
     TopByHelp(E, Slot);
     Exit;
+  end;
+
+  { a share or an average of too few: "-", after every account ranked by it }
+  for f := 0 to High(Ids) do
+  begin
+    Needs[f] := SampleNeed(E, PlayerMetricNeed(Ids[f], What));
+    Short[f] := False;
   end;
 
   { the accounts of this server, and with SharedRankings of every server }
@@ -1095,6 +1275,8 @@ begin
     P := RankingView(E, Entries[k], Tmp);
     for f := 0 to High(Ids) do
       if P = nil then
+        SortKeys[k * SortCols + f] := -MaxDouble
+      else if PlayerMetricShort(P^, Ids[f], Needs[f]) then
         SortKeys[k * SortCols + f] := -MaxDouble
       else
         SortKeys[k * SortCols + f] := SortValue(PlayerMetricValue(E, P^, Ids[f]), PlayerMetricAsc(Ids[f]));
@@ -1144,7 +1326,7 @@ begin
       { the tier of the lists, as in !top (and as the metric tier sorts) }
       if ShowTier then
         Line := Line + PadR(Copy(EntryTier(E, Idx), 1, TIER_W - 1), TIER_W);
-      Line := Line + PadR(Copy(PlayerMetricText(E, Ids[0], PlayerMetricValue(E, P^, Ids[0])), 1, METRIC_W - 1), METRIC_W);
+      Line := Line + PadR(Copy(Cell(0), 1, METRIC_W - 1), METRIC_W);
       if ShowPoints then
         Line := Line + PadR(Num(P^.Points), 9);
       if ShowRating then
@@ -1172,12 +1354,20 @@ begin
         Continue;
       Line := PadR(IntToStr(k + 1), 5) + PadR(Copy(P^.ActiveName, 1, NameW - 1), NameW);
       for f := 0 to High(Ids) do
-        Line := Line + PadR(Copy(PlayerMetricText(E, Ids[f], PlayerMetricValue(E, P^, Ids[f])), 1, Widths[f] - 1), Widths[f]);
+        Line := Line + PadR(Copy(Cell(f), 1, Widths[f] - 1), Widths[f]);
       Out(E, Slot, TrimRight(Line), RowColor(k + 1, (Idx >= 0) and (Idx = Me)));
     end;
   end;
+  Needed := nil;
+  for f := 0 to High(Ids) do
+    if Short[f] then
+    begin
+      PlayerMetricNeed(Ids[f], What);
+      PushNeed(Needed, NeedItem(PlayerMetricHeader(Ids[f]), What, Needs[f]));
+    end;
+  NeedNote(E, Slot, Needed);
   if Ignored <> '' then
-    Out(E, Slot, '[Note] Ignored unknown metric(s): ' + Ignored, CLR_HINT);
+    Out(E, Slot, '[Note] Ignored unknown metric(s): ' + Clip(Ignored, LINE_W - 34), CLR_HINT);
   PageHint(E, Slot, Page, Pages, 'players');
   Remember(E, Slot, QK_TOPBY, Canon, Page, Pages);
 end;
@@ -1568,7 +1758,7 @@ begin
   end;
   if n = 0 then
   begin
-    Out(E, Slot, 'No players found matching: ' + Phrase, CLR_BAD);
+    Out(E, Slot, 'No players found matching: ' + Clip(Phrase, LINE_W - 27), CLR_BAD);
     Exit;
   end;
   PrepareSort(n, 1);

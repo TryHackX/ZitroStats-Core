@@ -328,24 +328,24 @@ end;
 
 procedure TestRegistry;
 const
-  { the counters of a record that follow the account's (5.5 round 3) }
-  FOLLOW_IDS: array[0..66] of Word = (60, 63, 65, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 90, 91, 92, 93, 94, 95,
+  { the counters of a record that follow the account's (5.5 round 3; 200-216: [Bridges], 5.6) }
+  FOLLOW_IDS: array[0..83] of Word = (60, 63, 65, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 90, 91, 92, 93, 94, 95,
     96, 97, 98, 99, 100, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 113, 114, 115, 116, 121, 122, 123, 124, 125,
     126, 127, 128, 129, 130, 131, 140, 141, 142, 144, 145, 148, 150, 151, 152, 153, 155, 156, 171, 172, 173, 174, 175,
-    176);
-  { and the ones the engine counts itself: the bests (61, 64, 112, 117, 118, 149) and the counts it
+    176, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216);
+  { and the ones the engine counts itself: the bests (61, 64, 112, 117, 118, 149, 217) and the counts it
     keeps by name }
-  OWN_IDS: array[0..32] of Word = (61, 62, 64, 80, 81, 82, 83, 84, 85, 86, 87, 88, 101, 112, 117, 118, 119, 120, 143,
-    146, 147, 149, 154, 160, 161, 162, 163, 164, 165, 166, 167, 168, 170);
+  OWN_IDS: array[0..33] of Word = (61, 62, 64, 80, 81, 82, 83, 84, 85, 86, 87, 88, 101, 112, 117, 118, 119, 120, 143,
+    146, 147, 149, 154, 160, 161, 162, 163, 164, 165, 166, 167, 168, 170, 217);
 var
   i, j, k, p: LongInt;
   Ok, Ok2: Boolean;
-  Used: array[0..199] of Boolean;
+  Used: array[0..217] of Boolean;
 begin
   WriteLn('       SizeOf(TPlayerMapStats) = ', SizeOf(TPlayerMapStats), ', fields: ', Length(PlayerMapFields),
     ', follows: ', Length(PMFollows));
-  Check('player-on-map fields: 137 in a record, 8, 8 and 4 in the entries of its lists, 3 in a map matchup',
-    (Length(PlayerMapFields) = 137) and (Length(PMWeaponFields) = 8) and (Length(PMRivalFields) = 8) and
+  Check('player-on-map fields: 155 in a record, 15, 8 and 4 in the entries of its lists, 3 in a map matchup',
+    (Length(PlayerMapFields) = 155) and (Length(PMWeaponFields) = 15) and (Length(PMRivalFields) = 8) and
     (Length(PMMatchupFields) = 4) and (Length(MatchupCellFields) = 3));
   { the new ids, the free ones between them, and every follow a counter of the record and of the
     account alike }
@@ -355,7 +355,7 @@ begin
   for i := 0 to High(OWN_IDS) do
     Used[OWN_IDS[i]] := True;
   Ok := Length(PMFollows) = Length(FOLLOW_IDS);
-  for i := 60 to 199 do
+  for i := 60 to 217 do
     if (DefAt(PlayerMapFields, i) >= 0) <> Used[i] then
     begin
       WriteLn('       player-on-map id ', i, ' registered: ', DefAt(PlayerMapFields, i) >= 0);
@@ -364,7 +364,26 @@ begin
   for i := 39 to 49 do
     if DefAt(PlayerMapFields, i) >= 0 then
       Ok := False;
-  Check('player-on-map ids 60-176 as documented (67 follow the account, 33 the engine counts), 39-49 and 177-199 free',
+  Check('player-on-map ids 60-176 and 200-217 as documented (84 follow the account, 34 the engine counts), 39-49 and ' +
+    '177-199 free', Ok);
+  { a weapon entry: 9-15 the hits and kills measured from their bullet's origin (5.6) }
+  Ok := True;
+  for i := 9 to 15 do
+  begin
+    k := DefAt(PMWeaponFields, i);
+    if (k < 0) or not PMWeaponFields[k].Stat then
+      Ok := False
+    else if i = 11 then
+      Ok := Ok and (PMWeaponFields[k].Kind = fkSingle) and (PMWeaponFields[k].Merge = mkMax)
+    else if i = 9 then
+      Ok := Ok and (PMWeaponFields[k].Kind = fkDouble) and (PMWeaponFields[k].Merge = mkSum)
+    else
+      Ok := Ok and (PMWeaponFields[k].Kind = fkInt32) and (PMWeaponFields[k].Merge = mkSum);
+  end;
+  k := DefAt(PlayerMapFields, 217);
+  Ok := Ok and (k >= 0) and (PlayerMapFields[k].Kind = fkSingle) and (PlayerMapFields[k].Merge = mkMax) and
+    (DefAt(PMWeaponFields, 16) < 0);
+  Check('a weapon entry: 9-15 the hits'' distance and air time (the longest hit the larger); 217 the record''s longest hit',
     Ok);
   Ok := True;
   Ok2 := True;
@@ -414,17 +433,17 @@ begin
     PMRivalFields[k].Stat and (PMRivalFields[j].Kind = fkInt32) and (PMRivalFields[j].Merge = mkSum) and
     PMRivalFields[j].Stat and (DefAt(PMRivalFields, 9) < 0));
   Ok := True;
-  for i := 260 to 273 do
+  for i := 260 to 280 do
     if DefAt(MapFields, i) < 0 then
       Ok := False;
-  for i := 274 to 299 do
+  for i := 281 to 299 do
     if DefAt(MapFields, i) >= 0 then
       Ok := False;
   k := DefAt(MapFields, 260);
   Ok := Ok and (k >= 0) and (MapFields[k].Kind = fkDouble) and not MapFields[k].Stat;
   k := DefAt(MapFields, 273);
   Ok := Ok and (k >= 0) and (MapFields[k].Kind = fkMatchups) and MapFields[k].Stat;
-  Check('map fields 260-273 (the load date is no statistic), 274-299 free', Ok);
+  Check('map fields 260-280 (the load date is no statistic; 274-280 the hits'' distance and air time), 281-299 free', Ok);
   Ok := True;
   for i := 0 to WSLOT_COUNT - 1 do
     for j := 0 to 15 do
@@ -1150,9 +1169,9 @@ begin
 
   DB.Profiles[DB.IndexOfId(5)]^.LastPlayedTime := DB.NowValue - 100;
   DB.Profiles[DB.IndexOfId(50)]^.LastPlayedTime := DB.NowValue - 1;
-  n := DB.PrunePlayerMaps(90);
+  n := DB.PrunePlayerMaps(90, 0);
   Check('MatrixPruneDays: the records of an account that has not played for so many days go', (n = 1) and
-    (DB.PM.Find(5, 'ctf_A') = nil) and (DB.PM.Find(50, 'ctf_A') <> nil) and (DB.PrunePlayerMaps(0) = 0));
+    (DB.PM.Find(5, 'ctf_A') = nil) and (DB.PM.Find(50, 'ctf_A') <> nil) and (DB.PrunePlayerMaps(0, 0) = 0));
 
   DB.Profiles[DB.IndexOfId(5)]^.LastPlayedTime := DB.NowValue;
   R := AddRec(DB, 5, 'ctf_B');
@@ -1278,9 +1297,10 @@ begin
   try
     RandSeed := 77;
     T0 := MonoMs;
+    { every record played on today (1000): the prune goes by the accounts }
     for i := 1 to 20000 do
     begin
-      Place := T.Obtain(1 + Random(4000), T.MapNumber('map' + IntToStr(Random(10)), True), 1);
+      Place := T.Obtain(1 + Random(4000), T.MapNumber('map' + IntToStr(Random(10)), True), 1000);
       Inc(T.Items[Place]^.Kills);
     end;
     Ok := TableConsistent(T);
@@ -1295,12 +1315,12 @@ begin
     Ok := Ok and (Length(T.OfMap('map3')) = 0) and TableConsistent(T);
     for i := 1 to 2000 do
     begin
-      Place := T.Obtain(1 + Random(4000), T.MapNumber('map' + IntToStr(Random(10)), True), 1);
+      Place := T.Obtain(1 + Random(4000), T.MapNumber('map' + IntToStr(Random(10)), True), 1000);
       Inc(T.Items[Place]^.Deaths);
     end;
     Ok := Ok and TableConsistent(T);
     n := T.Count;
-    Ok := Ok and (T.Prune(90, 1000, @LP.LastPlayed) > 0) and (T.Count < n) and TableConsistent(T);
+    Ok := Ok and (T.Prune(90, 0, 1000, @LP.LastPlayed) > 0) and (T.Count < n) and TableConsistent(T);
     for i := 0 to T.Places - 1 do
       if (T.Items[i] <> nil) and (T.Items[i]^.AccountId mod 2 <> 0) then
         Ok := False;

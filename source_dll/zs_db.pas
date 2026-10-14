@@ -132,8 +132,9 @@ type
     procedure RebuildRanks;
     procedure RebuildIndexes;
     { [Matrix] MatrixPruneDays: the player-on-map records of accounts that have not played for Days
-      days go (0 = none); returns how many }
-    function PrunePlayerMaps(Days: LongInt): LongInt;
+      days go (0 = none); MatrixMapPruneDays: also the records of a map not played on for MapDays days
+      and the rivals not fought for so long (0 = none); returns how many records }
+    function PrunePlayerMaps(Days, MapDays: LongInt): LongInt;
 
     { the exchange with the shared database: what changed since the last one (the lists are
       emptied), changes of the database that must not be sent back, accounts and maps it brought }
@@ -171,17 +172,12 @@ begin
   Result := (S <> '') and (S <> '0') and (S <> 'S0');
 end;
 
+{ TStrIndex.Add itself passes over a key it already holds with this value; a Find before it made
+  the index of thousands of accounts of one name ("Major") quadratic }
 procedure AddUnique(Idx: TStrIndex; const Key: AnsiString; Value: LongInt);
-var
-  Found: TIntArray;
-  k: LongInt;
 begin
   if Key = '' then
     Exit;
-  Found := Idx.Find(Key);
-  for k := 0 to High(Found) do
-    if Found[k] = Value then
-      Exit;
   Idx.Add(Key, Value);
 end;
 
@@ -526,9 +522,9 @@ begin
     Result := 0;
 end;
 
-function TStatsDB.PrunePlayerMaps(Days: LongInt): LongInt;
+function TStatsDB.PrunePlayerMaps(Days, MapDays: LongInt): LongInt;
 begin
-  Result := PM.Prune(Days, FNow, @AccountLastPlayed);
+  Result := PM.Prune(Days, MapDays, FNow, @AccountLastPlayed);
 end;
 
 { ---------------- changes ---------------- }

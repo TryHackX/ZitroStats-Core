@@ -40,6 +40,12 @@ type
     Longest: Single;
     Reloads, ReloadsManual, RoundsDropped, ReloadsDone, ReloadsCut, ReloadDeaths, ReloadTimed,
       ReloadTicks, ReloadNormTicks, ReloadEnds, ReloadDoneMille, ReloadDeathMille, ReloadTicksAll: Int64;
+    { [Bridges] (5.6): the hits' distances (metres) and the ticks their bullets and the lethal ones flew,
+      added up, and the longest hit }
+    HitDistSum: Double;
+    HitDistCount: Int64;
+    LongestHit: Single;
+    HitAirTicks, HitAirCount, KillAirTicks, KillAirCount: Int64;
   end;
 
 function IsZitroCommand(const Word: AnsiString): Boolean;
@@ -56,8 +62,10 @@ function NormalizeCommand(const Word: AnsiString): AnsiString;
 function ExecuteCommand(E: TZSEngine; Slot: LongInt; const W: TStringArray; Source: LongInt; Admin: Boolean): Boolean;
 function JoinWords(const W: TStringArray): AnsiString;
 { the weapon totals of !topweapons and !server, also written to stats.json }
-{ Shared: with the other servers of the database added (SharedWeapons, SharedServer) }
-procedure CollectWeaponTotals(E: TZSEngine; var T: array of TWeaponTotals; Shared: Boolean = False);
+{ Shared: with the other servers of the database added (SharedWeapons, SharedServer). MaxAgeMs: the
+  sums of this server's accounts may be that old (a player's view, > 0) or are added up now and kept
+  for those views (0, the server console); < 0 = added up now, nothing kept (the export) }
+procedure CollectWeaponTotals(E: TZSEngine; var T: array of TWeaponTotals; Shared: Boolean = False; MaxAgeMs: Int64 = -1);
 { '' when every metric name belongs to one metric only, otherwise the offending name (for tests) }
 function DuplicateAlias: AnsiString;
 { average length of the matches played on a map, in seconds }
@@ -464,12 +472,90 @@ begin
 end;
 
 { what applies to the current mode, '' for a cell that is left out (CellRows) }
+{ [Bridges] (5.6): the accuracy by how the shooter stood when he fired; '' when nothing was counted
+  that way yet (the hook and the memory reading were never on) }
+function StanceAccText(const Shots, Hits: array of LongInt): AnsiString;
+var
+  k, Sum: LongInt;
+const
+  NAMES: array[0..3] of AnsiString = ('stand', 'crouch', 'prone', 'air');
+begin
+  Result := '';
+  Sum := 0;
+  for k := 0 to 3 do
+    Inc(Sum, Shots[k]);
+  if Sum = 0 then
+    Exit;
+  Result := 'Accuracy by stance:';
+  for k := 0 to 3 do
+  begin
+    if k > 0 then
+      Result := Result + ',';
+    if Shots[k] > 0 then
+      Result := Result + ' ' + NAMES[k] + ' ' + Pct(Hits[k], Shots[k])
+    else
+      Result := Result + ' ' + NAMES[k] + ' -';
+  end;
+end;
+
 function IfText(Cond: Boolean; const Text: AnsiString): AnsiString;
 begin
   if Cond then
     Result := Text
   else
     Result := '';
+end;
+
+{ a text the caller typed, said back: cut to MaxLen with "..." at its end, so a line never grows past
+  LINE_W because of it (a chat line holds 100 characters, a console line more) }
+function Clip(const S: AnsiString; MaxLen: LongInt): AnsiString;
+begin
+  if Length(S) <= MaxLen then
+    Result := S
+  else
+    Result := Copy(S, 1, Max(0, MaxLen - 3)) + '...';
+end;
+
+{ [Bridges] (5.6): the hits and kills measured from where and when their bullet was made. Metres, '-'
+  for none; an average of metres or of ticks (in seconds), '-' without a count }
+function MetersText(M: Single): AnsiString;
+begin
+  if M > 0 then
+    Result := FloatStr(M, 1) + 'm'
+  else
+    Result := '-';
+end;
+
+function AvgMetersText(Sum: Double; Count: Int64): AnsiString;
+begin
+  if Count > 0 then
+    Result := FloatStr(Sum / Count, 1) + 'm'
+  else
+    Result := '-';
+end;
+
+function AvgAirText(Ticks, Count: Int64): AnsiString;
+begin
+  if Count > 0 then
+    Result := FloatStr(Ticks / Count / TICKS_PER_SECOND, 2) + 's'
+  else
+    Result := '-';
+end;
+
+{ the weapon slots whose hits have a distance - not the stab, the saw or the fists (the knife's slot has
+  the thrown knives) - and whose bullets have an air time: not a flame or a grenade (a fuse) either }
+function SlotHitMeasured(S: LongInt): Boolean;
+begin
+  Result := (S = WEP_KNIFE) or ((S >= 0) and (S < WSLOT_COUNT) and not IsMeleeWeapon(SlotWeapon(S)));
+end;
+
+function SlotAirTimed(S: LongInt): Boolean;
+var
+  W: LongInt;
+begin
+  W := SlotWeapon(S);
+  Result := SlotHitMeasured(S) and (W <> WEP_FLAMER) and (W <> WEP_FRAG) and (W <> WEP_CLUSTERNADE) and
+    (W <> WEP_CLUSTER);
 end;
 
 { Cells of which some may be left out (''): the others in their order, as many to a row as
@@ -565,15 +651,33 @@ end;
 
 const
   HEAVY_PER_SECOND = 3;
+  { the admins on the server have this many more a second, which no player can take }
+  HEAVY_ADMIN_RESERVE = 1;
+  { a name no account has is remembered this long (the same text again is answered without going
+    through every account), the last NOT_FOUND_KEPT of them }
+  NOT_FOUND_MS = 10000;
+  NOT_FOUND_KEPT = 8;
 
 var
   FindRefused: Boolean = False;
+  { the caller of the command that runs is an admin (set by ExecuteCommand) }
+  CallerAdmin: Boolean = False;
+  { the command that runs has had its turn of the player's search wait (SearchAllowed): a second
+    name in it (!versus a b) does not wait again }
+  SearchPaid: Boolean = False;
+  NotFoundText: array[0..NOT_FOUND_KEPT - 1] of AnsiString;
+  NotFoundUntil: array[0..NOT_FOUND_KEPT - 1] of Int64;
+  NotFoundAccounts: array[0..NOT_FOUND_KEPT - 1] of LongInt;
+  NotFoundEngine: array[0..NOT_FOUND_KEPT - 1] of Pointer;
+  NotFoundNext: LongInt = 0;
 
-{ Lists that go through every account: HEAVY_PER_SECOND on the whole server, also when paging.
-  The server console (slot 0) has no limit. }
+{ Lists that go through every account: HEAVY_PER_SECOND on the whole server, also when paging;
+  the admins on the server one more (HEAVY_ADMIN_RESERVE), so players cannot keep them out. The
+  server console (slot 0) has no limit. }
 function HeavyBudget(E: TZSEngine; Slot: LongInt): Boolean;
 var
   NowMs: Int64;
+  Limit: LongInt;
 begin
   Result := True;
   if (Slot < 1) or (Slot > MAX_PLAYERS) then
@@ -584,7 +688,10 @@ begin
     E.HeavyWindowMs := NowMs;
     E.HeavyInWindow := 0;
   end;
-  if E.HeavyInWindow >= HEAVY_PER_SECOND then
+  Limit := HEAVY_PER_SECOND;
+  if CallerAdmin then
+    Inc(Limit, HEAVY_ADMIN_RESERVE);
+  if E.HeavyInWindow >= Limit then
   begin
     Out(E, Slot, 'The server is busy with other lists, try again in a moment.', CLR_WARN);
     Exit(False);
@@ -610,6 +717,57 @@ begin
     Exit(False);
   if not Admin and (E.Cfg.HeavyCooldownSeconds > 0) then
     E.Extra[Slot].HeavyUntilMs := NowMs + Int64(E.Cfg.HeavyCooldownSeconds) * 1000;
+end;
+
+{ A name looked for in every account and a page of a list that goes through them: one per
+  SearchCooldownSeconds per player (admins excepted; once per command), and within the server-wide
+  limit. Without a wait of its own a few players typing names nobody has could keep every list of
+  the server busy. }
+function SearchAllowed(E: TZSEngine; Slot: LongInt): Boolean;
+var
+  NowMs: Int64;
+  Wait: Boolean;
+begin
+  Result := True;
+  if (Slot < 1) or (Slot > MAX_PLAYERS) then
+    Exit;
+  NowMs := MonoMs;
+  Wait := not CallerAdmin and not SearchPaid and (E.Cfg.SearchCooldownSeconds > 0);
+  if Wait and (NowMs < E.Extra[Slot].SearchUntilMs) then
+  begin
+    Out(E, Slot, Format('Please wait %d s before the next search or page.', [(E.Extra[Slot].SearchUntilMs - NowMs + 999) div 1000]),
+      CLR_WARN);
+    Exit(False);
+  end;
+  if not HeavyBudget(E, Slot) then
+    Exit(False);
+  if Wait then
+    E.Extra[Slot].SearchUntilMs := NowMs + Int64(E.Cfg.SearchCooldownSeconds) * 1000;
+  SearchPaid := True;
+end;
+
+{ the lower-case text was looked for in every account a moment ago and none had it (nor has one
+  been made since) }
+function KnownNotFound(E: TZSEngine; const Low: AnsiString): Boolean;
+var
+  k: LongInt;
+  NowMs: Int64;
+begin
+  NowMs := MonoMs;
+  for k := 0 to NOT_FOUND_KEPT - 1 do
+    if (NowMs < NotFoundUntil[k]) and (NotFoundEngine[k] = Pointer(E)) and (NotFoundAccounts[k] = E.DB.ProfileCount) and
+       (NotFoundText[k] = Low) then
+      Exit(True);
+  Result := False;
+end;
+
+procedure RememberNotFound(E: TZSEngine; const Low: AnsiString);
+begin
+  NotFoundText[NotFoundNext] := Low;
+  NotFoundUntil[NotFoundNext] := MonoMs + NOT_FOUND_MS;
+  NotFoundAccounts[NotFoundNext] := E.DB.ProfileCount;
+  NotFoundEngine[NotFoundNext] := Pointer(E);
+  NotFoundNext := (NotFoundNext + 1) mod NOT_FOUND_KEPT;
 end;
 
 { case-insensitive (ASCII) search for a lower-case needle, without allocating }
@@ -700,8 +858,9 @@ end;
   name, its beginning, the beginning of a word, any part, then the shorter name; the first slot
   of equal ones). Only when nobody on the server matches, the accounts: the exact name (the one
   seen last of several), then the closest name, and between equal ones the one seen last. Going
-  through every account counts toward the server-wide list limit for a player (Slot > 0); a
-  player on the server is found without it. }
+  through every account waits for the player's turn (SearchAllowed) and counts toward the
+  server-wide list limit for a player (Slot > 0); a player on the server is found without it, and
+  a text no account had a moment ago is not looked for again. }
 function FindProfileText(E: TZSEngine; const Arg: AnsiString; Slot: LongInt = 0): LongInt;
 var
   C: TIntArray;
@@ -736,7 +895,9 @@ begin
       Result := C[k];
   if Result >= 0 then
     Exit;
-  if not HeavyBudget(E, Slot) then
+  if (Slot >= 1) and (Slot <= MAX_PLAYERS) and KnownNotFound(E, Low) then
+    Exit;
+  if not SearchAllowed(E, Slot) then
   begin
     FindRefused := True;
     Exit;
@@ -757,6 +918,8 @@ begin
         BestLen := R mod 1000;
       end;
     end;
+  if (Result < 0) and (Slot >= 1) and (Slot <= MAX_PLAYERS) then
+    RememberNotFound(E, Low);
 end;
 
 { the server slot of a player on the server, for the session commands: the closest name among
@@ -1107,9 +1270,9 @@ end;
 function WeaponProblem(const Text, HelpCmd: AnsiString): AnsiString;
 begin
   if ResolveWeapon(Text) = -3 then
-    Result := Format('"%s" can be more than one weapon: %s.', [Trim(Text), WeaponCandidates(Text)])
+    Result := Clip(Format('"%s" can be more than one weapon: %s.', [Clip(Trim(Text), 30), WeaponCandidates(Text)]), LINE_W)
   else
-    Result := Format('Unknown weapon: %s. %s help lists the names.', [Trim(Text), HelpCmd]);
+    Result := Format('Unknown weapon: %s. %s help lists the names.', [Clip(Trim(Text), 40), HelpCmd]);
 end;
 
 { "<weapon> [who]": the weapon is the longest start of the text, up to three words, that names
@@ -1300,7 +1463,7 @@ begin
       NewPage := Max(1, St^.Pages);
   end;
   if (St^.LastQueryKind in [QK_TOPBY, QK_SEARCH, QK_SEARCH_ADMIN, QK_TOPWEAPONS, QK_TOPPERIOD, QK_TOPMAPSBY,
-     QK_MAPRIVALS, QK_MAPWEAPONS]) and not HeavyBudget(E, Slot) then
+     QK_MAPRIVALS, QK_MAPWEAPONS]) and not SearchAllowed(E, Slot) then
     Exit;
   RunQuery(E, Slot, St^.LastQueryKind, St^.LastQuery, NewPage);
 end;
@@ -1347,6 +1510,7 @@ function ExecuteCommand(E: TZSEngine; Slot: LongInt; const W: TStringArray; Sour
 var
   Cmd, Arg, Rest: AnsiString;
   Idx, N, S: LongInt;
+  TopHint: Boolean;
 begin
   Result := True;
   if Length(W) = 0 then
@@ -1356,6 +1520,8 @@ begin
   FindRefused := False;
   PoolRankValid := False;
   RankRefusal := '';
+  CallerAdmin := Admin;
+  SearchPaid := False;
   Cmd := BareCommand(W[0]);
   Rest := Trim(RestAfterWords(JoinWords(W), 1));
   if Length(W) > 1 then
@@ -1469,7 +1635,11 @@ begin
       ListTop(E, Slot, 1)
     else if StrToIntDef(Rest, -1) > 0 then
       ListTop(E, Slot, StrToIntDef(Rest, 1))
-    else if IsPlayerMetricList(Rest) then
+    { a number that is no page (0, -2, one too big) is no weapon by its number either }
+    else if (StrToIntDef(Rest, 1) <= 0) or AllDigits(Rest) then
+      Out(E, Slot, 'Usage: !top [page]   !top <player>   !top <metrics> = !topby <metrics>', CLR_WARN)
+    { a metric by its whole name; a player on the server called exactly so is the player }
+    else if IsPlayerMetricList(Rest) and not OnlineNameIs(E, Rest) then
     begin
       if HeavyAllowed(E, Slot, Admin) then
         ListTopBy(E, Slot, Rest, 1);
@@ -1477,12 +1647,16 @@ begin
     else
     begin
       Idx := FindProfileText(E, Rest, Slot);
+      { a player called like a metric, or a text that names one only roughly: that list is !topby }
+      TopHint := not FindRefused and (IsPlayerMetricList(Rest) or (not E.DB.Valid(Idx) and IsPlayerMetricList(Rest, False)));
       if E.DB.Valid(Idx) and (RankingPosition(E, Idx) > 0) then
         ListTopAround(E, Slot, RankingPosition(E, Idx))
       else if E.DB.Valid(Idx) then
         Out(E, Slot, E.DB.Profiles[Idx]^.ActiveName + ' is not in the ranking yet.', CLR_WARN)
       else
         NotFound(E, Slot);
+      if TopHint then
+        Out(E, Slot, 'The list by that metric: !topby ' + Clip(Rest, 40), CLR_HINT);
     end;
   end
   else if Cmd = 'topp' then
@@ -1516,7 +1690,8 @@ begin
   begin
     if (Rest = '') or SameText(Rest, 'help') then
       TopByHelp(E, Slot)
-    else if HeavyAllowed(E, Slot, Admin) then
+    { a text without a metric gets the help without a turn of the list limits }
+    else if not HasPlayerMetric(Rest) or HeavyAllowed(E, Slot, Admin) then
       ListTopBy(E, Slot, Rest, 1);
   end
   else if (Cmd = 'topskill') or (Cmd = 'toprating') then
@@ -1541,6 +1716,10 @@ begin
       Out(E, Slot, 'Usage: !zs_search <part of a name>' + BoolToStr(Admin, '   (admins: /zs_search also finds IP, HWID, SteamID)', ''), CLR_WARN)
     else if (Cmd = 'searcha') and not Admin then
       Out(E, Slot, 'This command is for admins. Use !zs_search <text>.', CLR_WARN)
+    { the server shows a chat line to everybody before a script reads it: an IP, a HWID or a SteamID
+      looked for there is read by every player, so the admin search runs as a / command only }
+    else if (Cmd = 'searcha') and (Source = SRC_CHAT) then
+      Out(E, Slot, 'Use /searcha <text>, never in chat: everybody on the server reads the chat.', CLR_BAD)
     else if Admin and ((Cmd = 'searcha') or (Source <> SRC_CHAT)) then
     begin
       if HeavyAllowed(E, Slot, Admin) then
@@ -1563,7 +1742,7 @@ begin
       if Idx >= 0 then
         ListTopMapsAround(E, Slot, MapPlayRank(E, Idx))
       else
-        Out(E, Slot, 'Map not found: ' + Rest, CLR_BAD);
+        Out(E, Slot, 'Map not found: ' + Clip(Rest, LINE_W - 15), CLR_BAD);
     end;
   end
   else if Cmd = 'topmapsp' then
@@ -1574,7 +1753,7 @@ begin
   begin
     if (Rest = '') or SameText(Rest, 'help') then
       TopMapsByHelp(E, Slot)
-    else if HeavyAllowed(E, Slot, Admin) then
+    else if not HasMapMetric(Rest) or HeavyAllowed(E, Slot, Admin) then
       ListTopMapsBy(E, Slot, Rest, 1);
   end
   else if (Cmd = 'heatmap') or (Cmd = 'heat') then
@@ -1677,7 +1856,7 @@ begin
   begin
     if (Rest = '') or SameText(Rest, 'help') then
       TopWeaponsByHelp(E, Slot)
-    else if HeavyAllowed(E, Slot, Admin) then
+    else if not HasWeaponMetric(Rest, False) or HeavyAllowed(E, Slot, Admin) then
       ListTopWeapons(E, Slot, Rest, 1);
   end
 

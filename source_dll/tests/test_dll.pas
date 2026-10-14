@@ -5,7 +5,7 @@ program test_dll;
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, dynlibs, zs_types;
+  SysUtils, Classes, dynlibs, zs_types;
 
 type
   TInit = function(ScriptDir: PChar; ApiVersion: LongInt): LongInt; cdecl;
@@ -17,7 +17,14 @@ type
   TTextFunc = function: PChar; cdecl;
   TStatFunc = function(Id, Stat: LongInt): Double; cdecl;
   THeal = procedure(Slot, Kits, Tick: LongInt; Regen, Kit: Single); cdecl;
-  TKit = procedure(Slot, Style, Tick: LongInt); cdecl;
+  TKit = function(Slot, Style, Tick: LongInt): LongInt; cdecl;
+  { [Bridges] (API 16) }
+  TFrame = function(Tick: LongInt): LongInt; cdecl;
+  TBind = function(Slot: LongInt; Obj: Pointer; X, Y: Single): LongInt; cdecl;
+  TCheckMem = function(Slot, State, W, A, SW, SA, Gren, Jets, Team, Keys: LongInt; X, Y, Health, Vest: Single): LongInt;
+    cdecl;
+  THit = function(Shooter, Victim, BulletId, Tick: LongInt; Damage: Single): LongInt; cdecl;
+  TDeath = function(Killer, Victim, BulletId, Flags, Tick: LongInt): LongInt; cdecl;
   TTeamJoin = function(Slot, Team, OldTeam, Tick: LongInt): LongInt; cdecl;
   TTopCopy = function(Rank: LongInt; Buf: PChar; Size: LongInt): LongInt; cdecl;
   TMapList = procedure(Count, CurrentId, Reason, Tick: LongInt; Names: PChar); cdecl;
@@ -50,6 +57,43 @@ begin
   end;
 end;
 
+function FileText(const Path: AnsiString): AnsiString;
+var
+  L: TStringList;
+begin
+  Result := '';
+  if not FileExists(Path) then
+    Exit;
+  L := TStringList.Create;
+  try
+    L.LoadFromFile(Path);
+    Result := L.Text;
+  finally
+    L.Free;
+  end;
+end;
+
+function Occurrences(const Sub, S: AnsiString): LongInt;
+var
+  p: LongInt;
+begin
+  Result := 0;
+  p := Pos(Sub, S);
+  while p > 0 do
+  begin
+    Inc(Result);
+    p := Pos(Sub, S, p + Length(Sub));
+  end;
+end;
+
+procedure WriteNil;
+var
+  P: PLongInt;
+begin
+  P := nil;
+  P^ := 1;
+end;
+
 procedure DeleteTree(const Dir: AnsiString);
 var
   SR: TSearchRec;
@@ -76,7 +120,7 @@ end;
 
 var
   Lib: TLibHandle;
-  DllPath, Root: AnsiString;
+  DllPath, Root, CrashLog: AnsiString;
   Init: TInit;
   Shutdown: TProc;
   IsReady, ActionBegin, ActionNext, ActionSlot, ProfileCount, ClaimToken, ApiVersion: TIntFunc;
@@ -90,13 +134,20 @@ var
   Kit: TKit;
   TeamJoin: TTeamJoin;
   TopCopy: TTopCopy;
+  TopCopy2: TTopCopy;
   MapListEv: TMapList;
   DamageEv: TDamage;
   KillEv: TKill;
+  Frame: TFrame;
+  Bind: TBind;
+  CheckMem: TCheckMem;
+  Bridges: TIntFunc;
+  Hit: THit;
+  Death: TDeath;
   T0: Int64;
   Kind, Lines, Ticks, InTick, MostInTick, n: LongInt;
   Help: Boolean;
-  Txt, HealLine: AnsiString;
+  Txt, HealLine, Txt2: AnsiString;
   Buf: array[0..127] of AnsiChar;
 
 { Polls the output the way main.pas does (ZS_Action_Begin, then ZS_Action_Next until 0), every
@@ -167,18 +218,46 @@ begin
   Sym(Lib, 'ZS_Ev_Ray');
   { for AntiFake, on a thread of its own }
   TopCopy := TTopCopy(Sym(Lib, 'ZS_API_Top_Player_Copy'));
+  { the same with the computer of the account (API 17) }
+  TopCopy2 := TTopCopy(Sym(Lib, 'ZS_API_Top_Player_Copy2'));
   { the maps list of the map vote }
   MapListEv := TMapList(Sym(Lib, 'ZS_Ev_Map_List'));
   { a hit with the velocities of both players (API 15), and a kill }
   DamageEv := TDamage(Sym(Lib, 'ZS_Ev_Damage'));
   KillEv := TKill(Sym(Lib, 'ZS_Ev_Kill'));
+  Frame := TFrame(Sym(Lib, 'ZS_Frame'));
+  Bind := TBind(Sym(Lib, 'ZS_Bind'));
+  CheckMem := TCheckMem(Sym(Lib, 'ZS_Check'));
+  Bridges := TIntFunc(Sym(Lib, 'ZS_Bridges'));
+  Hit := THit(Sym(Lib, 'ZS_Ev_Hit'));
+  Death := TDeath(Sym(Lib, 'ZS_Ev_Death'));
   if Failures > 0 then
     Halt(Failures);
 
   SetCurrentDir(Root);
   Check('wrong API version refused', Init(PChar(Root + PathDelim + 'script'), ZS_API_VERSION - 1) = -ZS_API_VERSION);
   Check('init', Init(PChar(Root + PathDelim + 'script'), ZS_API_VERSION) = ZS_API_VERSION);
+  { the crash diagnostics start with the first engine - every script start of main.pas makes one
+    (its finalization stops the engine) - in the log folder of settings.ini }
+  CrashLog := Root + PathDelim + 'logs' + PathDelim + 'zitrostats' + PathDelim + 'crash.log';
+  Check('crash.log started by the first init', Pos('ZitroStats ' + ZS_VERSION_STR + ' diagnostics started',
+    FileText(CrashLog)) > 0);
   Check('second init reuses the engine', Init(PChar(Root + PathDelim + 'script'), ZS_API_VERSION) = ZS_API_VERSION);
+  { the handler watches the whole process: a caught access violation of this program is written, the
+    Pascal exceptions it catches are not }
+  for n := 1 to 4 do
+    try
+      raise Exception.Create('caught');
+    except
+    end;
+  try
+    WriteNil;
+  except
+  end;
+  Txt := FileText(CrashLog);
+  Check('crash.log: a caught access violation of the process is written',
+    (Occurrences('code C0000005', Txt) = 1) and (Pos('test_dll.exe+', Txt) > 0));
+  Check('crash.log: a caught Pascal exception is no crash', Pos('E0465043', Txt) = 0);
   T0 := GetTickCount64;
   while (IsReady() = 0) and (GetTickCount64 - T0 < 10000) do
     Sleep(10);
@@ -260,6 +339,16 @@ begin
   FillChar(Buf, SizeOf(Buf), Ord('X'));
   n := TopCopy(1, @Buf[0], SizeOf(Buf));
   Check(Format('Top_Player_Copy: the text ends with a zero (%d)', [n]), (n >= 0) and (n < SizeOf(Buf)) and (Buf[n] = #0));
+  Txt := StrPas(@Buf[0]);
+  Buf[0] := 'X';
+  Check('Top_Player_Copy2: a buffer of one byte gets the closing zero', (TopCopy2(1, @Buf[0], 1) = 0) and (Buf[0] = #0));
+  Check('Top_Player_Copy2: no buffer', TopCopy2(1, nil, 16) = 0);
+  FillChar(Buf, SizeOf(Buf), Ord('X'));
+  n := TopCopy2(1, @Buf[0], SizeOf(Buf));
+  Txt2 := StrPas(@Buf[0]);
+  Check(Format('Top_Player_Copy2: the text of Top_Player_Copy, a tab and the computer (%d)', [n]),
+    (n >= 0) and (n < SizeOf(Buf)) and (Buf[n] = #0) and (((Txt = '') and (Txt2 = '')) or
+    ((Copy(Txt2, 1, Length(Txt) + 1) = Txt + #9) and (Pos(#9, Copy(Txt2, Length(Txt) + 2, MaxInt)) = 0))));
 
   { the map vote: the maps list of main.pas; /votemap (also what F12 sends) is claimed while the map
     vote is on (the default), /map and /nextmap stay the server's (slot 5 plays no part here) }
@@ -277,9 +366,9 @@ begin
 
   { the kits a player picks up, by kind; a style that is no kit counts nothing. Slot 2 has used its
     commands of this second above, so the answer waits for the next second. }
-  Kit(2, KIT_MEDICAL, 50);
-  Kit(2, KIT_VEST, 51);
-  Kit(2, 5, 52);
+  { outside a server the library reads no health: main.pas counts what a kit gave (0) }
+  Check('ZS_Ev_Kit leaves the health of the kits to main.pas when nothing is read (0)',
+    (Kit(2, KIT_MEDICAL, 50) = 0) and (Kit(2, KIT_VEST, 51) = 0) and (Kit(2, 5, 52) = 0));
   Sleep(1100);
   Check('!otherstats is a ZitroStats command', Command(2, '!otherstats', 0, 0, 120) = 1);
   Help := WaitLine(2, 'Kits: Med', 5000, Txt);
@@ -298,15 +387,38 @@ begin
   Check('ZS_Ev_Damage: the victim''s velocity is his speed, the bullet tells the distance: ' + Trim(Txt),
     Help and (Pos('killed you', Txt) > 0) and (Pos('30 m/s', Txt) > 0) and (Pos('~5 m', Txt) > 0));
 
+  { [Bridges] (5.6): this program is no Soldat server - nothing of one is found, every bridge says so,
+    and the events of the script go on as before }
+  Check('ZS_Frame follows nobody here', Frame(300) = 0);
+  Check(Format('no hook and no memory reading outside a server (%d)', [Bridges()]), Bridges() and 7 = 0);
+  Check('ZS_Bind finds no soldier', (Bind(1, nil, 0, 0) = 0) and (Bind(40, nil, 0, 0) = 0));
+  Check('ZS_Check checks nothing', CheckMem(1, 1, 3, 30, 1, 7, 2, 190, 1, 0, 100, 200, 150, 0) = -1);
+  Check('ZS_Ev_Hit and ZS_Ev_Death leave the events to main.pas', (Hit(2, 1, 5, 300, 20) = 0) and
+    (Death(2, 1, 5, 0, 300) = 0) and (Hit(0, 33, 5, 300, 20) = 0) and (Death(33, 0, 5, 0, 300) = 0));
+  Check('/zs_perf tells why the bridges do not run', (Command(0, '/zs_perf', SRC_CONSOLE, Token, 301) = 1) and
+    WaitLine(0, 'bridges: memory: not available', 5000, Txt));
+
   T0 := GetTickCount64;
   Shutdown();
   Check('shutdown returns', GetTickCount64 - T0 < 10000);
   Check('restart after shutdown', Init(PChar(Root + PathDelim + 'script'), ZS_API_VERSION) = ZS_API_VERSION);
+  { a /recompile is a shutdown and an init: the diagnostics go on }
+  try
+    WriteNil;
+  except
+  end;
+  Txt := FileText(CrashLog);
+  Check('crash.log after a shutdown and a new init', (Occurrences('code C0000005', Txt) = 2) and
+    (Pos('E0465043', Txt) = 0));
   Check('a new engine has a new token', ClaimToken() <> 0);
   T0 := GetTickCount64;
   while (IsReady() = 0) and (GetTickCount64 - T0 < 10000) do
     Sleep(10);
   Check('accounts persisted', ProfileCount() = 2);
+  { the engine of a script start is a new one: the bridges tell it again what runs (else it would
+    count the shots of the hook and of the ammunition both) }
+  Check('a new engine hears what the bridges do', (Frame(400) = 0) and
+    WaitLine(0, '[ZitroStats] bridges: hooks:', 5000, Txt));
   Shutdown();
 
   if Failures = 0 then
