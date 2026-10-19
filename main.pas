@@ -2438,7 +2438,7 @@ begin
 
   Game.TickThreshold := 1;
   Game.OnClockTick := @HandleClock;
-  WriteLn('[ZitroStats] 5.7 started, loading data in the background.');
+  WriteLn('[ZitroStats] 5.7.1 started, loading data in the background.');
 end;
 
 initialization

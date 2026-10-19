@@ -1071,6 +1071,7 @@ begin
     Bal.Slots[S].ImmuneUntil := ShiftTick(Bal.Slots[S].ImmuneUntil, Delta, MaxLongInt);
     Bal.Slots[S].LockUntil := ShiftTick(Bal.Slots[S].LockUntil, Delta, MaxLongInt);
     Bal.Slots[S].ReviewUntil := ShiftTick(Bal.Slots[S].ReviewUntil, Delta, MaxLongInt);
+    Bal.Slots[S].SwitchUntil := ShiftTick(Bal.Slots[S].SwitchUntil, Delta, MaxLongInt);
     Bal.Slots[S].MoveSent := ShiftTick(Bal.Slots[S].MoveSent, Delta, GameTick);
   end;
   for k := 0 to High(Bal.Memory) do
@@ -1104,6 +1105,7 @@ begin
     MV.ListTick := ShiftTick(MV.ListTick, Delta, GameTick);
     MV.StartTick := ShiftTick(MV.StartTick, Delta, GameTick);
     MV.LastEndTick := ShiftTick(MV.LastEndTick, Delta, GameTick);
+    MV.GapUntil := ShiftTick(MV.GapUntil, Delta, MaxLongInt);
     MV.SoldatUntil := ShiftTick(MV.SoldatUntil, Delta, MaxLongInt);
     MV.ChangeDue := ShiftTick(MV.ChangeDue, Delta, MaxLongInt);
     MV.ChangingUntil := ShiftTick(MV.ChangingUntil, Delta, MaxLongInt);

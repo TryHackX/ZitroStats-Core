@@ -196,7 +196,7 @@ begin
     Pos('  ZS_API_VERSION = ' + IntToStr(ZS_API_VERSION) + ';', MainPas) > 0);
   Check('main.pas names the release of the library (' + ZS_VERSION_STR + ')',
     Pos('''[ZitroStats] ' + ZS_VERSION_STR + ' started, loading data in the background.''', MainPas) > 0);
-  Check('ZitroStats 5.7, API 17', (ZS_VERSION_STR = '5.7') and (ZS_API_VERSION = 17));
+  Check('ZitroStats 5.7.1, API 17', (ZS_VERSION_STR = '5.7.1') and (ZS_API_VERSION = 17));
 
   { ZSS-01: build.sh never writes into the library a running server has loaded: a new file, renamed
     over the old one }

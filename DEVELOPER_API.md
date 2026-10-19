@@ -1,4 +1,4 @@
-# ZitroStats 5.7 - Developer API
+# ZitroStats 5.7.1 - Developer API
 
 Other ScriptCore 3 scripts on the same server can read ZitroStats data - points, ranks, kills, ratings and more - by calling functions of the ZitroStats library. The values come from the statistics ZitroStats keeps in memory, so no files are read.
 
@@ -8,7 +8,7 @@ The API was tested from a second script on Soldat Server 2.8.2 (Windows).
 
 ## Requirements
 
-- ZitroStats 5.7 is installed and running; its `main.pas` starts the library.
+- ZitroStats 5.7.1 is installed and running; its `main.pas` starts the library.
 - The server allows libraries for scripts: `server.ini`, section `[ScriptCore3]`, `AllowDlls=1`.
 - Your script's `config.ini` contains `Sandboxed = 0` and `AllowDlls = 1`.
 
@@ -61,7 +61,7 @@ ScriptCore refuses to load a script whose declaration names an export the librar
 | Function | Result |
 | :--- | :--- |
 | `ZS_Is_Ready(): Integer` | 1 when ZitroStats has loaded its data, otherwise 0 |
-| `ZS_Get_Api_Version(): Integer` | `17` for ZitroStats 5.7. The number follows the reserved calls of `main.pas` as well: the functions and StatIDs of this document are the same as with API 14 (ZitroStats 5.2), 15 (5.5) and 16 (5.6); 17 adds `ZS_API_Top_Player_Copy2` for other libraries |
+| `ZS_Get_Api_Version(): Integer` | `17` for ZitroStats 5.7 and 5.7.1. The number follows the reserved calls of `main.pas` as well: the functions and StatIDs of this document are the same as with API 14 (ZitroStats 5.2), 15 (5.5) and 16 (5.6); 17 adds `ZS_API_Top_Player_Copy2` for other libraries |
 | `ZS_API_Get_Player_Stat(SlotID, StatID): Double` | A statistic of the account used by the player in slot 1-32; 0 while the player is on a registered account without having logged in (`/login`) |
 | `ZS_API_Get_Player_Name(SlotID): PChar` | Name of the player in the slot |
 | `ZS_API_Get_Player_Rank(SlotID): Integer` | Position of the player's account in the points ranking (1 = best); 0 while the player is not logged in to a registered account |

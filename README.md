@@ -1,10 +1,10 @@
-# ZitroStats 5.7
+# ZitroStats 5.7.1
 
 Statistics, rankings and optional player accounts for **Soldat Dedicated Server 2.8.2 (Soldat 1.7.1)**.
 
 Author: **Dominik (TryHackX)** - based on the original ZitroStats by Zitro - MIT License.
 
-Every statistic, where it is shown and in which game modes: [STATISTICS.md](STATISTICS.md). Reading ZitroStats data from other scripts: [DEVELOPER_API.md](DEVELOPER_API.md). What is new or different since 5.6: [Changes in 5.7](#changes-in-57).
+Every statistic, where it is shown and in which game modes: [STATISTICS.md](STATISTICS.md). Reading ZitroStats data from other scripts: [DEVELOPER_API.md](DEVELOPER_API.md). What is new or different since 5.6: [Changes in 5.7.1](#changes-in-571) and [Changes in 5.7](#changes-in-57).
 
 ---
 
@@ -27,7 +27,8 @@ Every statistic, where it is shown and in which game modes: [STATISTICS.md](STAT
 15. [Colours](#colours)
 16. [Building from source](#building-from-source)
 17. [Troubleshooting](#troubleshooting)
-18. [Changes in 5.7](#changes-in-57)
+18. [Changes in 5.7.1](#changes-in-571)
+19. [Changes in 5.7](#changes-in-57)
 
 ---
 
@@ -91,14 +92,14 @@ soldatserver/
    - `server.ini` of the server, section `[ScriptCore3]`: `AllowDlls=1`
 3. Pick a start: `Example-configs/` holds complete `settings.ini` files for typical servers (deathmatch, survival realistic deathmatch, CTF, survival realistic CTF, teammatch, infiltration, hold the flag, pointmatch, rambomatch, several servers on one MySQL database, a website copy); its `README.txt` says what each one changes. Copy the one that fits over `settings.ini` (keep a backup), or keep the included `settings.ini`.
 4. Set `[Admin] ConfirmPassword` in `settings.ini`. Resets, restores, merges and the other operations confirmed with `/yes` are refused until it is set.
-5. Start the server. The console shows the library file with its SHA-256 and `[ZitroStats] 5.7 started, loading data in the background.`, then what the [server bridges](#server-bridges) found (`[ZitroStats] bridges: hooks: CreateBullet in place, HealthHit in place; memory: on, ...`), and one of:
+5. Start the server. The console shows the library file with its SHA-256 and `[ZitroStats] 5.7.1 started, loading data in the background.`, then what the [server bridges](#server-bridges) found (`[ZitroStats] bridges: hooks: CreateBullet in place, HealthHit in place; memory: on, ...`), and one of:
    - `imported N accounts from ...` after a 4.x import (and lines for the maps and server records);
    - `N accounts, M maps loaded ...` with existing data;
    - nothing more on a fresh installation.
 
    After a 4.x import or on a fresh installation the first automatic backup follows at once: `backup saved: ...-auto.zsdb`.
 
-   A `/recompile` (and a change of the game mode, which reloads every script) stops the library and starts it again. The game thread waits while the events the game sent before are applied (3 seconds at most), the time on the names of the players online is added and the journal is written (with `Engine = mysql` also the last exchange, a few seconds at most); then the data is read again from the snapshot and the journal, and admins in the game and the console hear `ZitroStats 5.7: script compiled and running, loaded N accounts, M maps in X ms` once it is ready (nothing is said with nobody online). A `/recompile` in the middle of a map goes on with the match: the score so far is not counted again (no rounds, Hold the Flag points or a second `FIRST BLOOD!` out of it), and it is no new load of the map (`Loads` of `!mapstats`). What lives only in memory starts anew: the kill streaks and `!session` of the players online, `!lastfight`, the form of the players on the map and the locks of the team balance, an operation waiting for `/yes`. A `/recompile` while the data is still loading (the first seconds after the start) stops the load: nothing of it is written, and the next start reads the files again.
+   A `/recompile` (and a change of the game mode, which reloads every script) stops the library and starts it again. The game thread waits while the events the game sent before are applied (3 seconds at most), the time on the names of the players online is added and the journal is written (with `Engine = mysql` also the last exchange, a few seconds at most); then the data is read again from the snapshot and the journal, and admins in the game and the console hear `ZitroStats 5.7.1: script compiled and running, loaded N accounts, M maps in X ms` once it is ready (nothing is said with nobody online). A `/recompile` in the middle of a map goes on with the match: the score so far is not counted again (no rounds, Hold the Flag points or a second `FIRST BLOOD!` out of it), and it is no new load of the map (`Loads` of `!mapstats`). What lives only in memory starts anew: the kill streaks and `!session` of the players online, `!lastfight`, the form of the players on the map and the locks of the team balance, an operation waiting for `/yes`. A `/recompile` while the data is still loading (the first seconds after the start) stops the load: nothing of it is written, and the next start reads the files again.
 
 `main.pas` loads the library from `scripts/ZitroStats-Core/`. If you rename the folder, replace that path in the `external` declarations at the top of `main.pas`; the path must not contain spaces. Copies of `zitrostats_dll.dll` / `.so` left in the server root by version 4.x are not used and can be deleted; ZitroStats names them in the console at start.
 
@@ -833,7 +834,7 @@ and `tests/bench_db.pas [accounts]` times the heavy paths on a large ranking (60
 | `... Unknown database ...` | The database named in `[MySQL] Database` does not exist: create it (`CREATE DATABASE soldat_stats`); ZitroStats makes only the tables. |
 | `shared database: ... so nothing is exchanged until ... started again ...` | The first start with `Engine = mysql` did not reach the database (`has not joined the database yet`), or joining it or reading it back failed. Restart the server while the database answers; one that has not joined yet joins then. After `reading it back failed`, what the server collects until that restart does not reach the database. |
 | `shared database: ... needs InnoDB` | A `zs_db_*` table uses another table engine: run the `ALTER TABLE ... ENGINE = InnoDB` the line names. |
-| The server stops without a message | Look at `logs/zitrostats/crash.log`. From the start of the server (the line `ZitroStats 5.7 diagnostics started` with the time) it records every serious exception of the server process - in any module, the server, Steam or a script library - with module, address, registers, a stack trace and the last events of ZitroStats, and a Free Pascal exception that nothing caught. If the last start has no record after its line, the process ended without such an exception (closed, killed) or ZitroStats was not running; on Linux the file is not written. |
+| The server stops without a message | Look at `logs/zitrostats/crash.log`. From the start of the server (the line `ZitroStats 5.7.1 diagnostics started` with the time) it records every serious exception of the server process - in any module, the server, Steam or a script library - with module, address, registers, a stack trace and the last events of ZitroStats, and a Free Pascal exception that nothing caught. If the last start has no record after its line, the process ended without such an exception (closed, killed) or ZitroStats was not running; on Linux the file is not written. |
 | `Set ConfirmPassword in the [Admin] section of settings.ini ...` | Every operation confirmed with `/yes` (resets, restores, merges, `/zs_unregister`, `/zs_setpass`, `/removeolderthan`) needs `[Admin] ConfirmPassword`. |
 | A team score jumped and went back, or a capture did not count | The score guard took a point back that the server gave for a join, a team change, a double capture or a match without opponents; the line is in `integrity.log`. `[Integrity] Enabled = 0` turns it off. |
 | A player was moved to the other team, or could not join a team | The team balance. `/balinfo` shows every player's strength and the last decisions (all of them are in `teambalance.log`); `/bal off` pauses it, `[Balance] Enabled = 0` turns it off. |
@@ -845,6 +846,14 @@ and `tests/bench_db.pas [accounts]` times the heavy paths on a large ranking (60
 | `settings.ini: [section] key=value ...` lines in the console | A key is misspelt or a value is invalid or out of range; the line says what is used instead. |
 
 For scripts that read statistics from ZitroStats see [DEVELOPER_API.md](DEVELOPER_API.md).
+
+---
+
+## Changes in 5.7.1
+
+5.7.1 fixes a bug of 5.7 that a review of its changes found. Replace `main.pas` and the library together (still API 17; on Linux build the `.so` again) and delete `main.psb`; the `settings.ini` of 5.7 stays as it is.
+
+- **About 414 days of server uptime:** the server's tick counter then starts again at 0. 5.7 moves every tick the engine keeps along with it, but not the two waits 5.7 added itself: a player who had used `!switch` in his session could not use it again until he reconnected (`!switch again in` millions of seconds), and after a map vote no new vote could start until the map changed. Both waits now move along with the others. Like the other waits of the team balance, the minute between two `!switch` of a player no longer runs during `/pause`.
 
 ---
 

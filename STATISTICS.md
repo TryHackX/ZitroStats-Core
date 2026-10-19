@@ -1,6 +1,6 @@
-# ZitroStats 5.7 - Statistics reference
+# ZitroStats 5.7.1 - Statistics reference
 
-This document lists every statistic ZitroStats 5.7 collects, how the code counts it and where it is shown. It is written from the source code (`source_dll/`, `main.pas`). Setting names are given as `[Section] Key`; the values in brackets are the ones in the shipped `settings.ini`.
+This document lists every statistic ZitroStats 5.7.1 collects, how the code counts it and where it is shown. It is written from the source code (`source_dll/`, `main.pas`). Setting names are given as `[Section] Key`; the values in brackets are the ones in the shipped `settings.ini`.
 
 ## Contents
 
@@ -1234,7 +1234,7 @@ Without an argument (library status):
 
 | Output | What it means |
 | :--- | :--- |
-| `[ZitroStats 5.7] <a> accounts, <m> maps, <o> online, read-only: <no/YES>` | Accounts, map records, humans online, whether saving is off. |
+| `[ZitroStats 5.7.1] <a> accounts, <m> maps, <o> online, read-only: <no/YES>` | Accounts, map records, humans online, whether saving is off. |
 | `journal gen <g>, <k> KB since snapshot, IO queue <q> KB, dropped events <d>` | Storage state: the journals since the last snapshot, those of the runs before this one included (5.7); events dropped because the queue was full (only position samples, bullets, ammunition, hits, shots and healing are dropped). |
 | `[Matrix] <n> player-on-map records, about <m> MB in memory` | Records of `[Matrix]` and roughly what they take in memory (the records with their weapons, rivals, matchups and heat cells; the indexes of the table not counted). |
 | `load: <message>` | Load problem or restore note, if any. |
@@ -1283,7 +1283,7 @@ Admins only. Diagnostics, no player statistics.
 
 | Output | What it means |
 | :--- | :--- |
-| `[ZitroStats 5.7] engine timing since <date>` | Start of the measurement. |
+| `[ZitroStats 5.7.1] engine timing since <date>` | Start of the measurement. |
 | `events: <n>, avg <x> ms, max <y> ms, batch max <b>, queued <q>, dropped <d>` | Game events applied, time per event, the largest batch, the queue now, and the events dropped because the queue was full. |
 | `timers: <n> runs, avg <x> ms, max <y> ms` | Timer passes of the engine thread. |
 | `data: <a> accounts, <h> free slots, <m> maps, <s> archived seasons` | Data sizes. |

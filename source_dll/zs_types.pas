@@ -8,7 +8,7 @@ uses
   SysUtils, Classes;
 
 const
-  ZS_VERSION_STR = '5.7';
+  ZS_VERSION_STR = '5.7.1';
   ZS_API_VERSION = 17;
   ZS_DB_FORMAT = 9;
 
